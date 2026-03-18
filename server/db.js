@@ -81,4 +81,22 @@ export const initializeDatabase = async () => {
     CREATE INDEX IF NOT EXISTS idx_uploads_owner_id
     ON uploads (owner_id, created_at DESC);
   `)
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS comments (
+      id BIGSERIAL PRIMARY KEY,
+      document_id TEXT NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+      owner_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      author_name TEXT NOT NULL,
+      page_id TEXT,
+      element_id TEXT,
+      body TEXT NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+  `)
+
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS idx_comments_document_id
+    ON comments (document_id, created_at DESC);
+  `)
 }

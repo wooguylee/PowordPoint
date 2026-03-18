@@ -14,7 +14,9 @@ import {
   createUpload,
   createUser,
   cleanupUnusedUploads,
+  createComment,
   deleteDocument,
+  deleteComment,
   deleteUpload,
   ensureUploadRoot,
   findUserByEmail,
@@ -22,6 +24,7 @@ import {
   getVersionDiff,
   listDocuments,
   listDocumentVersions,
+  listComments,
   listUploads,
   patchDocumentMeta,
   readDocument,
@@ -268,6 +271,33 @@ router.delete('/documents/:id', auth, async (ctx) => {
 
 router.get('/documents/:id/versions', auth, async (ctx) => {
   ctx.body = { versions: await listDocumentVersions(ctx.state.user.id, ctx.params.id) }
+})
+
+router.get('/documents/:id/comments', auth, async (ctx) => {
+  ctx.body = { comments: await listComments(ctx.state.user.id, ctx.params.id) }
+})
+
+router.post('/documents/:id/comments', auth, async (ctx) => {
+  const payload = ctx.request.body || {}
+
+  if (!payload.body) {
+    sendError(ctx, 400, 'Comment body is required.')
+    return
+  }
+
+  ctx.status = 201
+  ctx.body = {
+    comment: await createComment(ctx.state.user.id, ctx.params.id, payload),
+  }
+})
+
+router.delete('/comments/:id', auth, async (ctx) => {
+  try {
+    await deleteComment(ctx.state.user.id, ctx.params.id)
+    ctx.status = 204
+  } catch {
+    sendError(ctx, 404, 'Comment not found.')
+  }
 })
 
 router.get('/documents/:id/versions/:versionId/diff', auth, async (ctx) => {

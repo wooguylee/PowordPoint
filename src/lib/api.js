@@ -111,6 +111,26 @@ export const fetchVersionDiff = async (documentId, versionId) => {
   return payload.diff
 }
 
+export const fetchComments = async (documentId) => {
+  const payload = await request(`/api/documents/${documentId}/comments`)
+  return Array.isArray(payload.comments) ? payload.comments : []
+}
+
+export const createCommentOnServer = async (documentId, comment) => {
+  const payload = await request(`/api/documents/${documentId}/comments`, {
+    method: 'POST',
+    body: JSON.stringify(comment),
+  })
+
+  return payload.comment
+}
+
+export const deleteCommentFromServer = async (commentId) => {
+  await request(`/api/comments/${commentId}`, {
+    method: 'DELETE',
+  })
+}
+
 export const uploadImageToServer = async (file) => {
   const body = new FormData()
   body.append('image', file)

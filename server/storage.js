@@ -339,3 +339,64 @@ export const getVersionDiff = async (userId, documentId, versionId) => {
     versionPages,
   }
 }
+
+export const listComments = async (userId, documentId) => {
+  const { rows: documentRows } = await pool.query(`SELECT owner_id FROM documents WHERE id = $1`, [documentId])
+
+  if (documentRows.length === 0) {
+    return []
+  }
+
+  ensureOwner(documentRows[0], userId)
+
+  const { rows } = await pool.query(
+    `
+      SELECT
+        id::text AS id,
+        page_id AS "pageId",
+        element_id AS "elementId",
+        body,
+        author_name AS "authorName",
+        created_at AS "createdAt"
+      FROM comments
+      WHERE document_id = $1
+      ORDER BY created_at DESC
+    `,
+    [documentId],
+  )
+
+  return rows
+}
+
+export const createComment = async (userId, documentId, comment) => {
+  const { rows: documentRows } = await pool.query(`SELECT owner_id FROM documents WHERE id = $1`, [documentId])
+
+  if (documentRows.length === 0) {
+    throw new Error('Document not found.')
+  }
+
+  ensureOwner(documentRows[0], userId)
+
+  const user = await findUserById(userId)
+  const { rows } = await pool.query(
+    `
+      INSERT INTO comments (document_id, owner_id, author_name, page_id, element_id, body)
+      VALUES ($1, $2, $3, $4, $5, $6)
+      RETURNING id::text AS id, page_id AS "pageId", element_id AS "elementId", body, author_name AS "authorName", created_at AS "createdAt"
+    `,
+    [documentId, userId, user?.name || 'User', comment.pageId || null, comment.elementId || null, comment.body],
+  )
+
+  return rows[0]
+}
+
+export const deleteComment = async (userId, commentId) => {
+  const { rows } = await pool.query(`SELECT owner_id FROM comments WHERE id::text = $1`, [commentId])
+
+  if (rows.length === 0) {
+    throw new Error('Comment not found.')
+  }
+
+  ensureOwner(rows[0], userId)
+  await pool.query(`DELETE FROM comments WHERE id::text = $1`, [commentId])
+}

@@ -43,8 +43,11 @@ import {
 } from './lib/editor'
 import {
   cleanupUploadsOnServer,
+  createCommentOnServer,
+  deleteCommentFromServer,
   deleteDocumentFromServer,
   deleteUploadFromServer,
+  fetchComments,
   fetchCurrentUser,
   fetchDocumentVersions,
   fetchVersionDiff,
@@ -69,6 +72,77 @@ const defaultLlmState = {
   baseUrl: 'https://api.openai.com/v1',
   model: 'gpt-4.1-mini',
 }
+
+const MAX_HISTORY = 80
+
+const createTemplates = () => [
+  {
+    id: 'proposal',
+    title: 'Proposal deck',
+    description: 'Title, summary, three-part structure, KPI table',
+    document: sanitizeDocument({
+      id: createId('doc'),
+      title: 'Proposal Template',
+      description: 'Proposal document template',
+      createdAt: new Date().toISOString(),
+      pages: [
+        {
+          ...createBlankPage('Overview'),
+          elements: [
+            createTextElement(88, 88, { text: 'Project Proposal', fontSize: 44, width: 700, height: 80 }),
+            createTextElement(92, 182, { text: 'Executive summary\nKey opportunity\nExpected outcome', fontSize: 24, width: 540, height: 180 }),
+            createShapeElement('rect', 640, 170, { width: 190, height: 200, fill: '#dfeef2' }),
+            createTableElement(88, 460, { width: 760, height: 260 }),
+          ],
+        },
+      ],
+    }),
+  },
+  {
+    id: 'meeting',
+    title: 'Meeting notes',
+    description: 'Agenda, decisions, owners, next steps',
+    document: sanitizeDocument({
+      id: createId('doc'),
+      title: 'Meeting Notes Template',
+      description: 'Structured meeting note template',
+      createdAt: new Date().toISOString(),
+      pages: [
+        {
+          ...createBlankPage('Notes'),
+          elements: [
+            createTextElement(88, 88, { text: 'Meeting Notes', fontSize: 42, width: 620, height: 70 }),
+            createTextElement(88, 180, { text: 'Agenda\n-\n\nDecisions\n-\n\nAction items\n-', fontSize: 24, width: 520, height: 420, fontFamily: 'Avenir Next, Segoe UI Variable, Noto Sans KR, sans-serif' }),
+            createTableElement(570, 180, { width: 290, height: 260, cols: 2, rows: 4, cells: [['Owner', 'Due'], ['Name', 'Date'], ['Name', 'Date'], ['Name', 'Date']] }),
+          ],
+        },
+      ],
+    }),
+  },
+  {
+    id: 'report',
+    title: 'Status report',
+    description: 'Status, risks, metrics, timeline',
+    document: sanitizeDocument({
+      id: createId('doc'),
+      title: 'Status Report Template',
+      description: 'Operational report template',
+      createdAt: new Date().toISOString(),
+      pages: [
+        {
+          ...createBlankPage('Status'),
+          elements: [
+            createTextElement(88, 88, { text: 'Weekly Status Report', fontSize: 40, width: 700, height: 80 }),
+            createShapeElement('rect', 88, 190, { width: 240, height: 180, fill: '#dcefe5' }),
+            createShapeElement('rect', 360, 190, { width: 240, height: 180, fill: '#fff0d4' }),
+            createShapeElement('rect', 632, 190, { width: 240, height: 180, fill: '#f8d8cf' }),
+            createTableElement(88, 430, { width: 784, height: 280 }),
+          ],
+        },
+      ],
+    }),
+  },
+]
 
 const snapTolerance = 8
 const gridSize = 24
@@ -458,6 +532,14 @@ function App() {
   const [authForm, setAuthForm] = useState({ email: '', password: '', name: '' })
   const [authStatus, setAuthStatus] = useState({ type: 'idle', message: '' })
   const [currentUser, setCurrentUser] = useState(null)
+  const [comments, setComments] = useState([])
+  const [commentStatus, setCommentStatus] = useState({ type: 'idle', message: '' })
+  const [commentDraft, setCommentDraft] = useState('')
+  const [historyPast, setHistoryPast] = useState([])
+  const [historyFuture, setHistoryFuture] = useState([])
+  const [activeTemplateId, setActiveTemplateId] = useState('proposal')
+
+  const templates = useMemo(() => createTemplates(), [])
 
   const stageRef = useRef(null)
   const transformerRef = useRef(null)
@@ -488,6 +570,29 @@ function App() {
   useEffect(() => {
     window.localStorage.setItem(LOCAL_DRAFT_KEY, JSON.stringify(documentData))
   }, [documentData])
+
+  useEffect(() => {
+    if (!currentUser || !documentData.id) {
+      setComments([])
+      return
+    }
+
+    const loadComments = async () => {
+      try {
+        setCommentStatus({ type: 'loading', message: 'Loading comments...' })
+        const nextComments = await fetchComments(documentData.id)
+        setComments(nextComments)
+        setCommentStatus({ type: 'success', message: 'Comments ready.' })
+      } catch (error) {
+        setCommentStatus({
+          type: 'error',
+          message: error instanceof Error ? error.message : 'Could not load comments.',
+        })
+      }
+    }
+
+    loadComments()
+  }, [currentUser, documentData.id])
 
   useEffect(() => {
     window.localStorage.setItem(LOCAL_LLM_KEY, JSON.stringify(llmConfig))
@@ -695,7 +800,11 @@ function App() {
   }, [currentPage.id, patchElementsByIds, selectedElements, selectedIds, textEditor, updateCurrentPage])
 
   const updatePages = useCallback((updater) => {
-    setDocumentData((prev) => updateTimestamp(updater(prev)))
+    setDocumentData((prev) => {
+      setHistoryPast((history) => [...history.slice(-MAX_HISTORY + 1), prev])
+      setHistoryFuture([])
+      return updateTimestamp(updater(prev))
+    })
   }, [])
 
   const updateCurrentPage = useCallback((pageUpdater) => {
@@ -764,7 +873,53 @@ function App() {
     setUploads([])
     setVersions([])
     setVersionDiff(null)
+    setComments([])
     setAuthStatus({ type: 'idle', message: 'Signed out.' })
+  }
+
+  const handleUndo = () => {
+    setHistoryPast((past) => {
+      if (past.length === 0) {
+        return past
+      }
+
+      const previous = past[past.length - 1]
+      setHistoryFuture((future) => [documentData, ...future].slice(0, MAX_HISTORY))
+      setDocumentData(previous)
+      return past.slice(0, -1)
+    })
+  }
+
+  const handleRedo = () => {
+    setHistoryFuture((future) => {
+      if (future.length === 0) {
+        return future
+      }
+
+      const [next, ...rest] = future
+      setHistoryPast((past) => [...past.slice(-MAX_HISTORY + 1), documentData])
+      setDocumentData(next)
+      return rest
+    })
+  }
+
+  const applyTemplate = (templateId) => {
+    const template = templates.find((item) => item.id === templateId)
+
+    if (!template) {
+      return
+    }
+
+    const nextDocument = sanitizeDocument({
+      ...template.document,
+      id: createId('doc'),
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    })
+
+    setHistoryPast([])
+    setHistoryFuture([])
+    applyLoadedDocument(nextDocument)
   }
 
   const refreshLibrary = async () => {
@@ -807,6 +962,24 @@ function App() {
       setVersionStatus({
         type: 'error',
         message: error instanceof Error ? error.message : 'Could not refresh version history.',
+      })
+    }
+  }
+
+  const refreshComments = async () => {
+    if (!documentData.id) {
+      setComments([])
+      return
+    }
+
+    try {
+      const nextComments = await fetchComments(documentData.id)
+      setComments(nextComments)
+      setCommentStatus({ type: 'success', message: 'Comments refreshed.' })
+    } catch (error) {
+      setCommentStatus({
+        type: 'error',
+        message: error instanceof Error ? error.message : 'Could not refresh comments.',
       })
     }
   }
@@ -1199,6 +1372,31 @@ function App() {
     setSelectedIds([element.id])
   }
 
+  const handleLayerOrder = (direction) => {
+    if (selectedIds.length === 0) {
+      return
+    }
+
+    updateCurrentPage((page) => {
+      const elements = [...page.elements]
+      const targetIndex = elements.findIndex((element) => element.id === selectedIds[0])
+
+      if (targetIndex === -1) {
+        return page
+      }
+
+      const step = direction === 'up' ? 1 : -1
+      const nextIndex = Math.max(0, Math.min(elements.length - 1, targetIndex + step))
+      const [item] = elements.splice(targetIndex, 1)
+      elements.splice(nextIndex, 0, item)
+      return { ...page, elements }
+    })
+  }
+
+  const toggleLayerFlag = (elementId, key) => {
+    patchElementsByIds([elementId], (element) => ({ ...element, [key]: !element[key] }))
+  }
+
   const handleImageImportRequest = (targetId = null) => {
     setImageTargetId(targetId)
     imageInputRef.current?.click()
@@ -1318,6 +1516,27 @@ function App() {
 
     const diff = await fetchVersionDiff(documentData.id, versionId)
     setVersionDiff(diff)
+  }
+
+  const handleAddComment = async () => {
+    if (!documentData.id || !commentDraft.trim()) {
+      return
+    }
+
+    const comment = await createCommentOnServer(documentData.id, {
+      body: commentDraft,
+      pageId: currentPage.id,
+      elementId: primarySelectedElement?.id || null,
+    })
+
+    setComments((prev) => [comment, ...prev])
+    setCommentDraft('')
+    setCommentStatus({ type: 'success', message: 'Comment added.' })
+  }
+
+  const handleDeleteComment = async (commentId) => {
+    await deleteCommentFromServer(commentId)
+    setComments((prev) => prev.filter((comment) => comment.id !== commentId))
   }
 
   const handleResetDocument = () => {
@@ -1446,6 +1665,8 @@ function App() {
           <p className="subtle">Canvas documents, inline text editing, PDF export, snap, align, group, and Koa-backed JSON storage.</p>
         </div>
         <div className="header-actions">
+          <button className="ghost-button" onClick={handleUndo} disabled={historyPast.length === 0}>Undo</button>
+          <button className="ghost-button" onClick={handleRedo} disabled={historyFuture.length === 0}>Redo</button>
           {currentUser ? <span className="user-badge">{currentUser.name}</span> : null}
           <button className="ghost-button" onClick={() => documentInputRef.current?.click()}>Import JSON</button>
           <button className="ghost-button" onClick={saveDocumentJson}>Export JSON</button>
@@ -1519,6 +1740,23 @@ function App() {
               <button className="mini-button" onClick={handleDuplicatePage}>Duplicate</button>
               <button className="mini-button danger" onClick={handleRemovePage}>Remove</button>
             </div>
+          </div>
+
+          <div className="panel-block">
+            <div className="block-header">
+              <h2>Templates</h2>
+              <span>{templates.length}</span>
+            </div>
+            <label>
+              <span>Template</span>
+              <select value={activeTemplateId} onChange={(event) => setActiveTemplateId(event.target.value)}>
+                {templates.map((template) => (
+                  <option key={template.id} value={template.id}>{template.title}</option>
+                ))}
+              </select>
+            </label>
+            <p className="subtle">{templates.find((template) => template.id === activeTemplateId)?.description}</p>
+            <button className="ghost-button" onClick={() => applyTemplate(activeTemplateId)}>Apply template</button>
           </div>
 
           <div className="panel-block">
@@ -1671,6 +1909,31 @@ function App() {
               <input value={currentPage.background} onChange={(event) => updateCurrentPage((page) => ({ ...page, background: event.target.value }))} />
             </label>
           </div>
+
+          <div className="panel-block">
+            <div className="block-header">
+              <h2>Layers</h2>
+              <span>{currentPage.elements.length}</span>
+            </div>
+            <div className="page-list server-list">
+              {[...currentPage.elements].reverse().map((element) => (
+                <div key={element.id} className={`page-card ${selectedIds.includes(element.id) ? 'active' : ''}`}>
+                  <button className="library-open" onClick={() => setSelectedIds([element.id])}>
+                    <strong>{element.type}</strong>
+                    <small>{element.id}</small>
+                  </button>
+                  <div className="row-actions">
+                    <button className="mini-button" onClick={() => toggleLayerFlag(element.id, 'hidden')}>{element.hidden ? 'Show' : 'Hide'}</button>
+                    <button className="mini-button" onClick={() => toggleLayerFlag(element.id, 'locked')}>{element.locked ? 'Unlock' : 'Lock'}</button>
+                  </div>
+                </div>
+              ))}
+            </div>
+            <div className="row-actions">
+              <button className="mini-button" onClick={() => handleLayerOrder('up')}>Move up</button>
+              <button className="mini-button" onClick={() => handleLayerOrder('down')}>Move down</button>
+            </div>
+          </div>
         </aside>
 
         <main className="canvas-panel panel">
@@ -1723,7 +1986,7 @@ function App() {
 
                   {currentPage.elements.map((element) => {
                     const selected = selectedIds.includes(element.id)
-                    const draggable = activeTool === 'select'
+                    const draggable = activeTool === 'select' && !element.locked
                     const onSelect = (event) => {
                       event.cancelBubble = true
                       setElementSelection(element.id, event.evt.shiftKey || event.evt.ctrlKey || event.evt.metaKey)
@@ -1797,7 +2060,9 @@ function App() {
                     if (element.type === 'rect') {
                       return (
                         <Group {...sharedProps} {...groupProps}>
+                          {element.hidden ? null : (
                           <Rect width={element.width} height={element.height} fill={element.fill} stroke={element.stroke} strokeWidth={element.strokeWidth} opacity={element.opacity} cornerRadius={22} shadowColor={selected ? '#da7c46' : '#10232c'} shadowBlur={selected ? 18 : 8} shadowOpacity={0.15} />
+                          )}
                         </Group>
                       )
                     }
@@ -1805,7 +2070,9 @@ function App() {
                     if (element.type === 'ellipse') {
                       return (
                         <Group {...sharedProps} {...groupProps}>
+                          {element.hidden ? null : (
                           <Ellipse x={element.width / 2} y={element.height / 2} radiusX={element.width / 2} radiusY={element.height / 2} fill={element.fill} stroke={element.stroke} strokeWidth={element.strokeWidth} opacity={element.opacity} shadowColor={selected ? '#da7c46' : '#10232c'} shadowBlur={selected ? 18 : 8} shadowOpacity={0.15} />
+                          )}
                         </Group>
                       )
                     }
@@ -1813,13 +2080,15 @@ function App() {
                     if (element.type === 'arrow') {
                       return (
                         <Group {...sharedProps} {...groupProps}>
+                          {element.hidden ? null : (
                           <Arrow points={[0, 0, element.width, element.height]} stroke={element.stroke} fill={element.stroke} strokeWidth={element.strokeWidth} pointerLength={element.pointerLength} pointerWidth={element.pointerWidth} opacity={element.opacity} />
+                          )}
                         </Group>
                       )
                     }
 
                     if (element.type === 'pen') {
-                      return (
+                      return element.hidden ? null : (
                         <Line
                           key={element.id}
                           x={element.x}
@@ -1844,7 +2113,7 @@ function App() {
                     }
 
                     if (element.type === 'text') {
-                      return (
+                      return element.hidden ? null : (
                         <Group
                           {...sharedProps}
                           {...groupProps}
@@ -1856,11 +2125,11 @@ function App() {
                     }
 
                     if (element.type === 'image') {
-                      return <CanvasImageNode {...sharedProps} element={element} />
+                      return element.hidden ? null : <CanvasImageNode {...sharedProps} element={element} />
                     }
 
                     if (element.type === 'table') {
-                      return <TableNode {...sharedProps} element={element} />
+                      return element.hidden ? null : <TableNode {...sharedProps} element={element} />
                     }
 
                     return null
@@ -2075,6 +2344,52 @@ function App() {
                             />
                           </label>
                         </div>
+                        <div className="row-actions wrap-actions">
+                          <button
+                            className="mini-button"
+                            onClick={() => patchElementsByIds([primarySelectedElement.id], (element) => ({
+                              ...element,
+                              rows: element.rows + 1,
+                              cells: [...element.cells, Array.from({ length: element.cols }, () => 'Value')],
+                            }))}
+                          >
+                            Add row
+                          </button>
+                          <button
+                            className="mini-button"
+                            onClick={() => patchElementsByIds([primarySelectedElement.id], (element) => ({
+                              ...element,
+                              rows: Math.max(1, element.rows - 1),
+                              cells: element.cells.slice(0, Math.max(1, element.rows - 1)),
+                            }))}
+                          >
+                            Remove row
+                          </button>
+                          <button
+                            className="mini-button"
+                            onClick={() => patchElementsByIds([primarySelectedElement.id], (element) => ({
+                              ...element,
+                              cols: element.cols + 1,
+                              cells: element.cells.map((row, index) => [...row, index === 0 ? `Header ${row.length + 1}` : 'Value']),
+                            }))}
+                          >
+                            Add col
+                          </button>
+                          <button
+                            className="mini-button"
+                            onClick={() => patchElementsByIds([primarySelectedElement.id], (element) => ({
+                              ...element,
+                              cols: Math.max(1, element.cols - 1),
+                              cells: element.cells.map((row) => row.slice(0, Math.max(1, element.cols - 1))),
+                            }))}
+                          >
+                            Remove col
+                          </button>
+                        </div>
+                        <label>
+                          <span>Header fill</span>
+                          <input value={primarySelectedElement.headerFill} onChange={(event) => patchElementsByIds([primarySelectedElement.id], (element) => ({ ...element, headerFill: event.target.value }))} />
+                        </label>
                         <label>
                           <span>Cells</span>
                           <textarea rows="8" value={serializeCells(primarySelectedElement.cells)} onChange={(event) => patchElementsByIds([primarySelectedElement.id], (element) => ({ ...element, cells: parseCells(event.target.value, primarySelectedElement.rows, primarySelectedElement.cols) }))} />
@@ -2127,6 +2442,37 @@ function App() {
             <button className="accent-button full" onClick={handleLlmRun}>Run AI action</button>
             <p className={`status-pill ${llmStatus.type}`}>{llmStatus.message || 'Idle'}</p>
             <p className="subtle tiny">The React client now calls the Koa backend proxy, which forwards the OpenAI-compatible request and returns parsed JSON.</p>
+          </div>
+
+          <div className="panel-block">
+            <div className="block-header">
+              <h2>Comments</h2>
+              <span>{comments.length}</span>
+            </div>
+            <p className={`status-pill ${commentStatus.type}`}>{commentStatus.message || 'Idle'}</p>
+            <label>
+              <span>New comment</span>
+              <textarea rows="4" value={commentDraft} onChange={(event) => setCommentDraft(event.target.value)} placeholder="Comment on the page or selected element" />
+            </label>
+            <div className="row-actions">
+              <button className="accent-button" onClick={handleAddComment} disabled={!currentUser || !documentData.id}>Add comment</button>
+              <button className="ghost-button" onClick={refreshComments} disabled={!currentUser || !documentData.id}>Refresh</button>
+            </div>
+            <div className="page-list server-list">
+              {comments.map((comment) => (
+                <div key={comment.id} className="page-card">
+                  <div className="library-open">
+                    <strong>{comment.authorName}</strong>
+                    <small>{new Date(comment.createdAt).toLocaleString()}</small>
+                    <small>{comment.elementId ? `Element: ${comment.elementId}` : `Page: ${comment.pageId || currentPage.id}`}</small>
+                    <small>{comment.body}</small>
+                  </div>
+                  <div className="row-actions">
+                    <button className="mini-button danger" onClick={() => handleDeleteComment(comment.id)}>Delete</button>
+                  </div>
+                </div>
+              ))}
+            </div>
           </div>
         </aside>
       </div>
