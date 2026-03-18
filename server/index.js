@@ -1,17 +1,25 @@
 import fs from 'node:fs/promises'
 import path from 'node:path'
 import { randomUUID } from 'node:crypto'
+import bcrypt from 'bcryptjs'
+import jwt from 'jsonwebtoken'
 import Koa from 'koa'
 import Router from '@koa/router'
 import multer from '@koa/multer'
 import bodyParser from 'koa-bodyparser'
 import serve from 'koa-static'
+import { initializeDatabase } from './db.js'
 import {
   UPLOAD_ROOT,
+  createUpload,
+  createUser,
   cleanupUnusedUploads,
   deleteDocument,
   deleteUpload,
   ensureUploadRoot,
+  findUserByEmail,
+  findUserById,
+  getVersionDiff,
   listDocuments,
   listDocumentVersions,
   listUploads,
@@ -26,7 +34,9 @@ const router = new Router({ prefix: '/api' })
 const PORT = Number(process.env.PORT || 8787)
 const DIST_ROOT = path.resolve('dist')
 const uploadStatic = serve(UPLOAD_ROOT)
+const JWT_SECRET = process.env.JWT_SECRET
 
+await initializeDatabase()
 await ensureUploadRoot()
 
 const upload = multer({
@@ -42,6 +52,38 @@ const upload = multer({
 const sendError = (ctx, status, message) => {
   ctx.status = status
   ctx.body = { error: message }
+}
+
+const issueToken = (user) =>
+  jwt.sign(
+    { sub: user.id, email: user.email, name: user.name },
+    JWT_SECRET,
+    { expiresIn: '7d' },
+  )
+
+const auth = async (ctx, next) => {
+  const header = ctx.headers.authorization || ''
+  const token = header.startsWith('Bearer ') ? header.slice(7) : ''
+
+  if (!token) {
+    sendError(ctx, 401, 'Authentication required.')
+    return
+  }
+
+  try {
+    const payload = jwt.verify(token, JWT_SECRET)
+    const user = await findUserById(payload.sub)
+
+    if (!user) {
+      sendError(ctx, 401, 'Invalid token.')
+      return
+    }
+
+    ctx.state.user = user
+    await next()
+  } catch {
+    sendError(ctx, 401, 'Invalid token.')
+  }
 }
 
 const extractJson = (rawText) => {
@@ -93,19 +135,68 @@ router.get('/health', (ctx) => {
   ctx.body = { ok: true }
 })
 
-router.get('/documents', async (ctx) => {
-  ctx.body = { documents: await listDocuments(ctx.query.q || '') }
+router.post('/auth/register', async (ctx) => {
+  const { email, name, password } = ctx.request.body || {}
+
+  if (!email || !name || !password) {
+    sendError(ctx, 400, 'email, name, and password are required.')
+    return
+  }
+
+  const existing = await findUserByEmail(email)
+  if (existing) {
+    sendError(ctx, 409, 'Email already exists.')
+    return
+  }
+
+  const user = await createUser({
+    id: randomUUID(),
+    email,
+    name,
+    passwordHash: await bcrypt.hash(password, 10),
+  })
+
+  ctx.status = 201
+  ctx.body = { user, token: issueToken(user) }
 })
 
-router.get('/documents/:id', async (ctx) => {
+router.post('/auth/login', async (ctx) => {
+  const { email, password } = ctx.request.body || {}
+
+  if (!email || !password) {
+    sendError(ctx, 400, 'email and password are required.')
+    return
+  }
+
+  const user = await findUserByEmail(email)
+  if (!user || !(await bcrypt.compare(password, user.passwordHash))) {
+    sendError(ctx, 401, 'Invalid credentials.')
+    return
+  }
+
+  ctx.body = {
+    user: { id: user.id, email: user.email, name: user.name, createdAt: user.createdAt },
+    token: issueToken(user),
+  }
+})
+
+router.get('/auth/me', auth, async (ctx) => {
+  ctx.body = { user: ctx.state.user }
+})
+
+router.get('/documents', auth, async (ctx) => {
+  ctx.body = { documents: await listDocuments(ctx.state.user.id, ctx.query.q || '') }
+})
+
+router.get('/documents/:id', auth, async (ctx) => {
   try {
-    ctx.body = { document: await readDocument(ctx.params.id) }
+    ctx.body = { document: await readDocument(ctx.state.user.id, ctx.params.id) }
   } catch {
     sendError(ctx, 404, 'Document not found.')
   }
 })
 
-router.post('/documents', async (ctx) => {
+router.post('/documents', auth, async (ctx) => {
   const documentData = ctx.request.body?.document
 
   if (!documentData || typeof documentData !== 'object') {
@@ -124,12 +215,12 @@ router.post('/documents', async (ctx) => {
     nextDocument.createdAt = nextDocument.updatedAt
   }
 
-  await writeDocument(documentId, nextDocument)
+  await writeDocument(ctx.state.user.id, documentId, nextDocument)
   ctx.status = 201
   ctx.body = { document: nextDocument }
 })
 
-router.put('/documents/:id', async (ctx) => {
+router.put('/documents/:id', auth, async (ctx) => {
   const documentData = ctx.request.body?.document
 
   if (!documentData || typeof documentData !== 'object') {
@@ -147,11 +238,11 @@ router.put('/documents/:id', async (ctx) => {
     nextDocument.createdAt = nextDocument.updatedAt
   }
 
-  await writeDocument(ctx.params.id, nextDocument)
+  await writeDocument(ctx.state.user.id, ctx.params.id, nextDocument)
   ctx.body = { document: nextDocument }
 })
 
-router.patch('/documents/:id', async (ctx) => {
+router.patch('/documents/:id', auth, async (ctx) => {
   const patch = ctx.request.body || {}
 
   if (typeof patch !== 'object') {
@@ -160,59 +251,74 @@ router.patch('/documents/:id', async (ctx) => {
   }
 
   try {
-    ctx.body = { document: await patchDocumentMeta(ctx.params.id, patch) }
+    ctx.body = { document: await patchDocumentMeta(ctx.state.user.id, ctx.params.id, patch) }
   } catch {
     sendError(ctx, 404, 'Document not found.')
   }
 })
 
-router.delete('/documents/:id', async (ctx) => {
+router.delete('/documents/:id', auth, async (ctx) => {
   try {
-    await deleteDocument(ctx.params.id)
+    await deleteDocument(ctx.state.user.id, ctx.params.id)
     ctx.status = 204
   } catch {
     sendError(ctx, 404, 'Document not found.')
   }
 })
 
-router.get('/documents/:id/versions', async (ctx) => {
-  ctx.body = { versions: await listDocumentVersions(ctx.params.id) }
+router.get('/documents/:id/versions', auth, async (ctx) => {
+  ctx.body = { versions: await listDocumentVersions(ctx.state.user.id, ctx.params.id) }
 })
 
-router.post('/documents/:id/restore/:versionId', async (ctx) => {
+router.get('/documents/:id/versions/:versionId/diff', auth, async (ctx) => {
+  try {
+    ctx.body = { diff: await getVersionDiff(ctx.state.user.id, ctx.params.id, ctx.params.versionId) }
+  } catch {
+    sendError(ctx, 404, 'Document version not found.')
+  }
+})
+
+router.post('/documents/:id/restore/:versionId', auth, async (ctx) => {
   try {
     ctx.body = {
-      document: await restoreDocumentVersion(ctx.params.id, ctx.params.versionId),
+      document: await restoreDocumentVersion(ctx.state.user.id, ctx.params.id, ctx.params.versionId),
     }
   } catch {
     sendError(ctx, 404, 'Document version not found.')
   }
 })
 
-router.get('/uploads', async (ctx) => {
-  ctx.body = { uploads: await listUploads() }
+router.get('/uploads', auth, async (ctx) => {
+  ctx.body = { uploads: await listUploads(ctx.state.user.id) }
 })
 
-router.delete('/uploads/:fileName', async (ctx) => {
+router.delete('/uploads/:fileName', auth, async (ctx) => {
   try {
-    await deleteUpload(ctx.params.fileName)
+    await deleteUpload(ctx.state.user.id, ctx.params.fileName)
     ctx.status = 204
   } catch {
     sendError(ctx, 404, 'Upload not found.')
   }
 })
 
-router.post('/uploads/cleanup', async (ctx) => {
-  ctx.body = { removed: await cleanupUnusedUploads() }
+router.post('/uploads/cleanup', auth, async (ctx) => {
+  ctx.body = { removed: await cleanupUnusedUploads(ctx.state.user.id) }
 })
 
-router.post('/uploads/image', upload.single('image'), async (ctx) => {
+router.post('/uploads/image', auth, upload.single('image'), async (ctx) => {
   if (!ctx.file) {
     sendError(ctx, 400, 'An image file is required.')
     return
   }
 
   ctx.status = 201
+  await createUpload(ctx.state.user.id, {
+    fileName: ctx.file.filename,
+    originalName: ctx.file.originalname,
+    url: `/uploads/${ctx.file.filename}`,
+    size: ctx.file.size,
+    type: ctx.file.mimetype,
+  })
   ctx.body = {
     image: {
       name: ctx.file.originalname,
@@ -223,7 +329,7 @@ router.post('/uploads/image', upload.single('image'), async (ctx) => {
   }
 })
 
-router.post('/llm', async (ctx) => {
+router.post('/llm', auth, async (ctx) => {
   const { apiKey, baseUrl, model, system, user } = ctx.request.body || {}
 
   if (!apiKey || !baseUrl || !model || !system || !user) {

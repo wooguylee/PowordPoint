@@ -29,6 +29,7 @@ import {
   createTableElement,
   createTextElement,
   duplicateElement,
+  distributeElements,
   finalizeDrawElement,
   getElementBounds,
   getSelectionBounds,
@@ -44,14 +45,20 @@ import {
   cleanupUploadsOnServer,
   deleteDocumentFromServer,
   deleteUploadFromServer,
+  fetchCurrentUser,
   fetchDocumentVersions,
+  fetchVersionDiff,
   fetchDocumentById,
   fetchDocumentLibrary,
   fetchUploads,
+  getAuthToken,
+  loginUser,
   renameDocumentOnServer,
+  registerUser,
   requestLlmProxy,
   restoreDocumentVersion as restoreDocumentVersionApi,
   saveDocumentToServer,
+  setAuthToken,
   uploadImageToServer,
 } from './lib/api'
 import { normalizeLlmPayload, buildPrompts } from './lib/llm'
@@ -243,6 +250,70 @@ const snapBoundsToPage = (bounds, deltaX, deltaY, page) => {
   }
 }
 
+const snapBoundsToGuides = (bounds, deltaX, deltaY, page, guidePool) => {
+  const moved = {
+    x: bounds.x + deltaX,
+    y: bounds.y + deltaY,
+    width: bounds.width,
+    height: bounds.height,
+  }
+
+  let bestDeltaX = deltaX
+  let bestDeltaY = deltaY
+  const guides = { vertical: [], horizontal: [] }
+  const movingVerticals = [moved.x, moved.x + moved.width / 2, moved.x + moved.width]
+  const movingHorizontals = [moved.y, moved.y + moved.height / 2, moved.y + moved.height]
+
+  guidePool.vertical.forEach((guide) => {
+    movingVerticals.forEach((position) => {
+      if (Math.abs(position - guide) <= snapTolerance) {
+        bestDeltaX += guide - position
+        guides.vertical = [guide]
+      }
+    })
+  })
+
+  guidePool.horizontal.forEach((guide) => {
+    movingHorizontals.forEach((position) => {
+      if (Math.abs(position - guide) <= snapTolerance) {
+        bestDeltaY += guide - position
+        guides.horizontal = [guide]
+      }
+    })
+  })
+
+  const pageSnap = snapBoundsToPage(bounds, bestDeltaX, bestDeltaY, page)
+  return {
+    deltaX: pageSnap.deltaX,
+    deltaY: pageSnap.deltaY,
+    guides: {
+      vertical: [...new Set([...guides.vertical, ...pageSnap.guides.vertical])],
+      horizontal: [...new Set([...guides.horizontal, ...pageSnap.guides.horizontal])],
+    },
+  }
+}
+
+const collectSnapGuides = (page, movingIds) => {
+  const vertical = [0, page.width / 2, page.width]
+  const horizontal = [0, page.height / 2, page.height]
+
+  page.elements.forEach((element) => {
+    if (movingIds.includes(element.id)) {
+      return
+    }
+
+    const bounds = getElementBounds(element)
+    if (!bounds) {
+      return
+    }
+
+    vertical.push(bounds.x, bounds.x + bounds.width / 2, bounds.x + bounds.width)
+    horizontal.push(bounds.y, bounds.y + bounds.height / 2, bounds.y + bounds.height)
+  })
+
+  return { vertical, horizontal }
+}
+
 const CanvasImageNode = ({ element, selected, draggable, onSelect, onDragStart, onDragMove, onDragEnd, onTransformEnd, registerRef }) => {
   const [image, setImage] = useState(null)
 
@@ -382,6 +453,11 @@ function App() {
   const [uploadStatus, setUploadStatus] = useState({ type: 'idle', message: '' })
   const [versions, setVersions] = useState([])
   const [versionStatus, setVersionStatus] = useState({ type: 'idle', message: '' })
+  const [versionDiff, setVersionDiff] = useState(null)
+  const [authMode, setAuthMode] = useState('login')
+  const [authForm, setAuthForm] = useState({ email: '', password: '', name: '' })
+  const [authStatus, setAuthStatus] = useState({ type: 'idle', message: '' })
+  const [currentUser, setCurrentUser] = useState(null)
 
   const stageRef = useRef(null)
   const transformerRef = useRef(null)
@@ -439,7 +515,30 @@ function App() {
   }, [])
 
   useEffect(() => {
+    const loadSession = async () => {
+      if (!getAuthToken()) {
+        return
+      }
+
+      try {
+        const user = await fetchCurrentUser()
+        setCurrentUser(user)
+        setAuthStatus({ type: 'success', message: `Signed in as ${user.name}.` })
+      } catch {
+        setAuthToken('')
+      }
+    }
+
+    loadSession()
+  }, [])
+
+  useEffect(() => {
     const loadLibrary = async () => {
+      if (!currentUser) {
+        setLibrary([])
+        return
+      }
+
       try {
         setLibraryStatus({ type: 'loading', message: 'Loading server documents...' })
         const documents = await fetchDocumentLibrary(libraryQuery)
@@ -454,10 +553,15 @@ function App() {
     }
 
     loadLibrary()
-  }, [libraryQuery])
+  }, [currentUser, libraryQuery])
 
   useEffect(() => {
     const loadUploads = async () => {
+      if (!currentUser) {
+        setUploads([])
+        return
+      }
+
       try {
         setUploadStatus({ type: 'loading', message: 'Loading uploads...' })
         const nextUploads = await fetchUploads()
@@ -472,11 +576,11 @@ function App() {
     }
 
     loadUploads()
-  }, [])
+  }, [currentUser])
 
   useEffect(() => {
     const loadVersions = async () => {
-      if (!documentData.id) {
+      if (!currentUser || !documentData.id) {
         setVersions([])
         return
       }
@@ -495,7 +599,7 @@ function App() {
     }
 
     loadVersions()
-  }, [documentData.id, documentData.updatedAt])
+  }, [currentUser, documentData.id, documentData.updatedAt])
 
   useEffect(() => {
     const transformer = transformerRef.current
@@ -632,6 +736,35 @@ function App() {
     setCurrentPageId(safeDocument.pages[0].id)
     setSelectedIds([])
     setTextEditor(null)
+  }
+
+  const handleAuthSubmit = async () => {
+    try {
+      setAuthStatus({ type: 'loading', message: authMode === 'login' ? 'Signing in...' : 'Creating account...' })
+      const payload =
+        authMode === 'login'
+          ? await loginUser({ email: authForm.email, password: authForm.password })
+          : await registerUser(authForm)
+
+      setAuthToken(payload.token)
+      setCurrentUser(payload.user)
+      setAuthStatus({ type: 'success', message: `Welcome, ${payload.user.name}.` })
+    } catch (error) {
+      setAuthStatus({
+        type: 'error',
+        message: error instanceof Error ? error.message : 'Authentication failed.',
+      })
+    }
+  }
+
+  const handleLogout = () => {
+    setAuthToken('')
+    setCurrentUser(null)
+    setLibrary([])
+    setUploads([])
+    setVersions([])
+    setVersionDiff(null)
+    setAuthStatus({ type: 'idle', message: 'Signed out.' })
   }
 
   const refreshLibrary = async () => {
@@ -805,7 +938,8 @@ function App() {
 
     const rawDeltaX = event.target.x() - session.anchorStart.x
     const rawDeltaY = event.target.y() - session.anchorStart.y
-    const snapped = snapBoundsToPage(session.bounds, rawDeltaX, rawDeltaY, currentPage)
+    const guidePool = collectSnapGuides(currentPage, session.ids)
+    const snapped = snapBoundsToGuides(session.bounds, rawDeltaX, rawDeltaY, currentPage, guidePool)
 
     setSnapGuides(snapped.guides)
 
@@ -977,6 +1111,14 @@ function App() {
     }
 
     replaceCurrentElements(alignElements(currentPage.elements, selectedIds, mode))
+  }
+
+  const handleDistribute = (direction) => {
+    if (selectedIds.length < 3) {
+      return
+    }
+
+    replaceCurrentElements(distributeElements(currentPage.elements, selectedIds, direction))
   }
 
   const handleGroupSelected = () => {
@@ -1169,6 +1311,15 @@ function App() {
     await refreshVersions()
   }
 
+  const handlePreviewVersionDiff = async (versionId) => {
+    if (!documentData.id) {
+      return
+    }
+
+    const diff = await fetchVersionDiff(documentData.id, versionId)
+    setVersionDiff(diff)
+  }
+
   const handleResetDocument = () => {
     const nextDocument = createDefaultDocument()
     applyLoadedDocument(nextDocument)
@@ -1295,14 +1446,50 @@ function App() {
           <p className="subtle">Canvas documents, inline text editing, PDF export, snap, align, group, and Koa-backed JSON storage.</p>
         </div>
         <div className="header-actions">
+          {currentUser ? <span className="user-badge">{currentUser.name}</span> : null}
           <button className="ghost-button" onClick={() => documentInputRef.current?.click()}>Import JSON</button>
           <button className="ghost-button" onClick={saveDocumentJson}>Export JSON</button>
-          <button className="ghost-button" onClick={saveServerDocument}>Save Server</button>
+          <button className="ghost-button" onClick={saveServerDocument} disabled={!currentUser}>Save Server</button>
           <button className="ghost-button" onClick={handleExportPng}>Export PNG</button>
           <button className="ghost-button" onClick={handleExportPdf}>Export PDF</button>
           <button className="accent-button" onClick={handleResetDocument}>New document</button>
+          {currentUser ? (
+            <button className="ghost-button" onClick={handleLogout}>Logout</button>
+          ) : null}
         </div>
       </header>
+
+      {!currentUser ? (
+        <section className="auth-panel panel">
+          <div className="panel-block auth-block">
+            <div className="block-header">
+              <h2>{authMode === 'login' ? 'Sign In' : 'Register'}</h2>
+              <span>Auth required for server sync</span>
+            </div>
+            <label>
+              <span>Email</span>
+              <input value={authForm.email} onChange={(event) => setAuthForm((prev) => ({ ...prev, email: event.target.value }))} />
+            </label>
+            {authMode === 'register' ? (
+              <label>
+                <span>Name</span>
+                <input value={authForm.name} onChange={(event) => setAuthForm((prev) => ({ ...prev, name: event.target.value }))} />
+              </label>
+            ) : null}
+            <label>
+              <span>Password</span>
+              <input type="password" value={authForm.password} onChange={(event) => setAuthForm((prev) => ({ ...prev, password: event.target.value }))} />
+            </label>
+            <div className="row-actions">
+              <button className="accent-button" onClick={handleAuthSubmit}>{authMode === 'login' ? 'Login' : 'Create account'}</button>
+              <button className="ghost-button" onClick={() => setAuthMode((prev) => (prev === 'login' ? 'register' : 'login'))}>
+                {authMode === 'login' ? 'Need account?' : 'Have account?'}
+              </button>
+            </div>
+            <p className={`status-pill ${authStatus.type}`}>{authStatus.message || 'Enter credentials to continue.'}</p>
+          </div>
+        </section>
+      ) : null}
 
       <div className="workspace-grid">
         <aside className="left-panel panel">
@@ -1384,6 +1571,7 @@ function App() {
                     updateCurrentPage((page) => ({ ...page, elements: [...page.elements, image] }))
                     setSelectedIds([image.id])
                   }}>
+                    <img className="upload-thumb" src={item.url} alt="" />
                     <strong>{item.name}</strong>
                     <small>{Math.round(item.size / 1024)} KB</small>
                     <small>Used by {item.usedBy} docs</small>
@@ -1411,13 +1599,40 @@ function App() {
                   <div className="library-open">
                     <strong>{item.title}</strong>
                     <small>{new Date(item.createdAt).toLocaleString()}</small>
+                    <small>{item.summary.pageCount} pages, {item.summary.elementCount} elements</small>
                   </div>
                   <div className="row-actions">
+                    <button className="mini-button" onClick={() => handlePreviewVersionDiff(item.versionId)}>Diff</button>
                     <button className="mini-button" onClick={() => handleRestoreVersion(item.versionId)}>Restore</button>
                   </div>
                 </div>
               ))}
             </div>
+            {versionDiff ? (
+              <div className="version-diff-card">
+                <strong>Diff Preview</strong>
+                <small>Version: {versionDiff.versionTitle}</small>
+                <small>Current: {versionDiff.currentTitle}</small>
+                <small>Page delta: {versionDiff.pageDelta}</small>
+                <small>Element delta: {versionDiff.elementDelta}</small>
+                <small>Added pages: {versionDiff.addedPageNames.join(', ') || 'None'}</small>
+                <small>Removed pages: {versionDiff.removedPageNames.join(', ') || 'None'}</small>
+                <div className="diff-grid">
+                  <div>
+                    <strong>Version Pages</strong>
+                    {versionDiff.versionPages?.map((page) => (
+                      <small key={`v-${page.id || page.name}`}>{page.name} ({page.elements?.length || 0})</small>
+                    ))}
+                  </div>
+                  <div>
+                    <strong>Current Pages</strong>
+                    {versionDiff.currentPages?.map((page) => (
+                      <small key={`c-${page.id || page.name}`}>{page.name} ({page.elements?.length || 0})</small>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            ) : null}
           </div>
 
           <div className="panel-block">
@@ -1723,6 +1938,8 @@ function App() {
                       {alignmentButtons.map((item) => (
                         <button key={item.id} className="ghost-button" onClick={() => handleAlign(item.id)}>{item.label}</button>
                       ))}
+                      <button className="ghost-button" onClick={() => handleDistribute('horizontal')}>Distribute H</button>
+                      <button className="ghost-button" onClick={() => handleDistribute('vertical')}>Distribute V</button>
                     </div>
                   </>
                 ) : null}

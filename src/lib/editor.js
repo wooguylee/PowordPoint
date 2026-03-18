@@ -592,3 +592,49 @@ export const alignElements = (elements, selectedIds, mode) => {
     return element
   })
 }
+
+export const distributeElements = (elements, selectedIds, direction) => {
+  const selected = elements.filter((element) => selectedIds.includes(element.id))
+
+  if (selected.length < 3) {
+    return elements
+  }
+
+  const items = selected
+    .map((element) => ({ element, bounds: getElementBounds(element) }))
+    .filter((item) => item.bounds)
+    .sort((left, right) =>
+      direction === 'horizontal'
+        ? left.bounds.x - right.bounds.x
+        : left.bounds.y - right.bounds.y,
+    )
+
+  const first = items[0]
+  const last = items[items.length - 1]
+
+  if (!first || !last) {
+    return elements
+  }
+
+  const totalSpan =
+    direction === 'horizontal'
+      ? last.bounds.x - first.bounds.x
+      : last.bounds.y - first.bounds.y
+  const gap = totalSpan / (items.length - 1)
+
+  const nextPositions = new Map()
+  items.forEach((item, index) => {
+    if (index === 0 || index === items.length - 1) {
+      nextPositions.set(item.element.id, item.element)
+      return
+    }
+
+    nextPositions.set(item.element.id, {
+      ...item.element,
+      x: direction === 'horizontal' ? first.bounds.x + gap * index : item.element.x,
+      y: direction === 'vertical' ? first.bounds.y + gap * index : item.element.y,
+    })
+  })
+
+  return elements.map((element) => nextPositions.get(element.id) || element)
+}

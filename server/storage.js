@@ -1,31 +1,11 @@
 import fs from 'node:fs/promises'
 import path from 'node:path'
+import { pool } from './db.js'
 
-const DATA_ROOT = path.resolve('server', 'data', 'documents')
 export const UPLOAD_ROOT = path.resolve('server', 'data', 'uploads')
-const VERSION_ROOT = path.resolve('server', 'data', 'versions')
-
-const ensureDataRoot = async () => {
-  await fs.mkdir(DATA_ROOT, { recursive: true })
-}
 
 export const ensureUploadRoot = async () => {
   await fs.mkdir(UPLOAD_ROOT, { recursive: true })
-}
-
-const ensureVersionRoot = async () => {
-  await fs.mkdir(VERSION_ROOT, { recursive: true })
-}
-
-const filePathFor = (documentId) => path.join(DATA_ROOT, `${documentId}.json`)
-const versionDirFor = (documentId) => path.join(VERSION_ROOT, documentId)
-
-const tryReadCurrentDocument = async (documentId) => {
-  try {
-    return await readDocument(documentId)
-  } catch {
-    return null
-  }
 }
 
 const collectUploadRefs = (value, refs = new Set()) => {
@@ -46,81 +26,139 @@ const collectUploadRefs = (value, refs = new Set()) => {
   return refs
 }
 
-const createVersionSnapshot = async (documentId, documentData) => {
-  await ensureVersionRoot()
-  await fs.mkdir(versionDirFor(documentId), { recursive: true })
-
-  const versionId = `${Date.now()}`
-  const versionData = {
-    versionId,
-    documentId,
-    createdAt: new Date().toISOString(),
-    document: documentData,
+const ensureOwner = (row, userId) => {
+  if (!row || row.owner_id !== userId) {
+    throw new Error('Forbidden')
   }
+}
 
-  await fs.writeFile(
-    path.join(versionDirFor(documentId), `${versionId}.json`),
-    JSON.stringify(versionData, null, 2),
-    'utf8',
+export const createUser = async ({ id, email, name, passwordHash }) => {
+  const { rows } = await pool.query(
+    `
+      INSERT INTO users (id, email, name, password_hash)
+      VALUES ($1, $2, $3, $4)
+      RETURNING id, email, name, created_at AS "createdAt"
+    `,
+    [id, email.toLowerCase(), name, passwordHash],
   )
+
+  return rows[0]
 }
 
-export const listDocuments = async (query = '') => {
-  await ensureDataRoot()
+export const findUserByEmail = async (email) => {
+  const { rows } = await pool.query(
+    `SELECT id, email, name, password_hash AS "passwordHash", created_at AS "createdAt" FROM users WHERE email = $1`,
+    [email.toLowerCase()],
+  )
 
-  const entries = await fs.readdir(DATA_ROOT, { withFileTypes: true })
-  const items = []
-  const normalizedQuery = `${query}`.trim().toLowerCase()
+  return rows[0] || null
+}
 
-  for (const entry of entries) {
-    if (!entry.isFile() || !entry.name.endsWith('.json')) {
-      continue
-    }
+export const findUserById = async (userId) => {
+  const { rows } = await pool.query(
+    `SELECT id, email, name, created_at AS "createdAt" FROM users WHERE id = $1`,
+    [userId],
+  )
 
-    const raw = await fs.readFile(path.join(DATA_ROOT, entry.name), 'utf8')
-    const documentData = JSON.parse(raw)
+  return rows[0] || null
+}
 
-    const summary = {
-      id: documentData.id,
-      title: documentData.title,
-      description: documentData.description,
-      updatedAt: documentData.updatedAt,
-      pageCount: Array.isArray(documentData.pages) ? documentData.pages.length : 0,
-    }
+export const listDocuments = async (userId, query = '') => {
+  const normalized = `%${`${query}`.trim().toLowerCase()}%`
+  const { rows } = await pool.query(
+    `
+      SELECT
+        id,
+        title,
+        description,
+        updated_at AS "updatedAt",
+        jsonb_array_length(COALESCE(payload->'pages', '[]'::jsonb)) AS "pageCount"
+      FROM documents
+      WHERE owner_id = $1
+        AND ($2 = '%%' OR lower(coalesce(title, '') || ' ' || coalesce(description, '')) LIKE $2)
+      ORDER BY updated_at DESC
+    `,
+    [userId, normalized],
+  )
 
-    if (
-      normalizedQuery &&
-      !`${summary.title || ''} ${summary.description || ''}`.toLowerCase().includes(normalizedQuery)
-    ) {
-      continue
-    }
+  return rows
+}
 
-    items.push(summary)
+export const readDocument = async (userId, documentId) => {
+  const { rows } = await pool.query(
+    `SELECT owner_id, payload FROM documents WHERE id = $1`,
+    [documentId],
+  )
+
+  if (rows.length === 0) {
+    throw new Error('Document not found.')
   }
 
-  return items.sort((left, right) => `${right.updatedAt}`.localeCompare(`${left.updatedAt}`))
+  ensureOwner(rows[0], userId)
+  return rows[0].payload
 }
 
-export const readDocument = async (documentId) => {
-  await ensureDataRoot()
-  const raw = await fs.readFile(filePathFor(documentId), 'utf8')
-  return JSON.parse(raw)
-}
+export const writeDocument = async (userId, documentId, documentData) => {
+  const client = await pool.connect()
 
-export const writeDocument = async (documentId, documentData) => {
-  await ensureDataRoot()
-  const currentDocument = await tryReadCurrentDocument(documentId)
+  try {
+    await client.query('BEGIN')
 
-  if (currentDocument) {
-    await createVersionSnapshot(documentId, currentDocument)
+    const currentResult = await client.query(
+      `SELECT owner_id, payload FROM documents WHERE id = $1`,
+      [documentId],
+    )
+
+    if (currentResult.rows.length > 0) {
+      ensureOwner(currentResult.rows[0], userId)
+      await client.query(
+        `
+          INSERT INTO document_versions (document_id, owner_id, title, payload, created_at)
+          VALUES ($1, $2, $3, $4::jsonb, NOW())
+        `,
+        [
+          documentId,
+          userId,
+          currentResult.rows[0].payload.title || 'Untitled document',
+          JSON.stringify(currentResult.rows[0].payload),
+        ],
+      )
+    }
+
+    await client.query(
+      `
+        INSERT INTO documents (id, owner_id, title, description, payload, created_at, updated_at)
+        VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7)
+        ON CONFLICT (id)
+        DO UPDATE SET
+          title = EXCLUDED.title,
+          description = EXCLUDED.description,
+          payload = EXCLUDED.payload,
+          updated_at = EXCLUDED.updated_at
+      `,
+      [
+        documentId,
+        userId,
+        documentData.title || 'Untitled document',
+        documentData.description || '',
+        JSON.stringify(documentData),
+        documentData.createdAt,
+        documentData.updatedAt,
+      ],
+    )
+
+    await client.query('COMMIT')
+    return documentData
+  } catch (error) {
+    await client.query('ROLLBACK')
+    throw error
+  } finally {
+    client.release()
   }
-
-  await fs.writeFile(filePathFor(documentId), JSON.stringify(documentData, null, 2), 'utf8')
-  return documentData
 }
 
-export const patchDocumentMeta = async (documentId, patch) => {
-  const current = await readDocument(documentId)
+export const patchDocumentMeta = async (userId, documentId, patch) => {
+  const current = await readDocument(userId, documentId)
   const nextDocument = {
     ...current,
     title: typeof patch.title === 'string' ? patch.title : current.title,
@@ -128,115 +166,142 @@ export const patchDocumentMeta = async (documentId, patch) => {
     updatedAt: new Date().toISOString(),
   }
 
-  await writeDocument(documentId, nextDocument)
+  await writeDocument(userId, documentId, nextDocument)
   return nextDocument
 }
 
-export const deleteDocument = async (documentId) => {
-  await ensureDataRoot()
-  await fs.unlink(filePathFor(documentId))
+export const deleteDocument = async (userId, documentId) => {
+  const { rows } = await pool.query(`SELECT owner_id FROM documents WHERE id = $1`, [documentId])
 
-  try {
-    await fs.rm(versionDirFor(documentId), { recursive: true, force: true })
-  } catch {
-    return undefined
+  if (rows.length === 0) {
+    throw new Error('Document not found.')
   }
+
+  ensureOwner(rows[0], userId)
+  await pool.query(`DELETE FROM document_versions WHERE document_id = $1`, [documentId])
+  await pool.query(`DELETE FROM documents WHERE id = $1`, [documentId])
 }
 
-export const listDocumentVersions = async (documentId) => {
-  await ensureVersionRoot()
-
-  try {
-    const entries = await fs.readdir(versionDirFor(documentId), { withFileTypes: true })
-    const versions = []
-
-    for (const entry of entries) {
-      if (!entry.isFile() || !entry.name.endsWith('.json')) {
-        continue
-      }
-
-      const raw = await fs.readFile(path.join(versionDirFor(documentId), entry.name), 'utf8')
-      const payload = JSON.parse(raw)
-      versions.push({
-        versionId: payload.versionId,
-        createdAt: payload.createdAt,
-        title: payload.document?.title || 'Untitled document',
-      })
-    }
-
-    return versions.sort((left, right) => `${right.createdAt}`.localeCompare(`${left.createdAt}`))
-  } catch {
+export const listDocumentVersions = async (userId, documentId) => {
+  const current = await pool.query(`SELECT owner_id FROM documents WHERE id = $1`, [documentId])
+  if (current.rows.length === 0) {
     return []
   }
+  ensureOwner(current.rows[0], userId)
+
+  const { rows } = await pool.query(
+    `
+      SELECT id::text AS "versionId", title, created_at AS "createdAt", payload
+      FROM document_versions
+      WHERE document_id = $1 AND owner_id = $2
+      ORDER BY created_at DESC
+    `,
+    [documentId, userId],
+  )
+
+  return rows.map((row, index) => ({
+    versionId: row.versionId,
+    createdAt: row.createdAt,
+    title: row.title,
+    summary: {
+      pageCount: Array.isArray(row.payload?.pages) ? row.payload.pages.length : 0,
+      elementCount: Array.isArray(row.payload?.pages)
+        ? row.payload.pages.reduce((count, page) => count + (Array.isArray(page.elements) ? page.elements.length : 0), 0)
+        : 0,
+      index,
+    },
+  }))
 }
 
-export const restoreDocumentVersion = async (documentId, versionId) => {
-  const currentDocument = await readDocument(documentId)
-  await createVersionSnapshot(documentId, currentDocument)
+export const readDocumentVersion = async (userId, documentId, versionId) => {
+  const { rows } = await pool.query(
+    `
+      SELECT id::text AS "versionId", created_at AS "createdAt", title, payload, owner_id
+      FROM document_versions
+      WHERE document_id = $1 AND id::text = $2
+    `,
+    [documentId, versionId],
+  )
 
-  const raw = await fs.readFile(path.join(versionDirFor(documentId), `${versionId}.json`), 'utf8')
-  const payload = JSON.parse(raw)
+  if (rows.length === 0) {
+    throw new Error('Document version not found.')
+  }
+
+  ensureOwner(rows[0], userId)
+  return rows[0]
+}
+
+export const restoreDocumentVersion = async (userId, documentId, versionId) => {
+  const currentDocument = await readDocument(userId, documentId)
+  const version = await readDocumentVersion(userId, documentId, versionId)
   const restored = {
-    ...payload.document,
+    ...version.payload,
     id: documentId,
     updatedAt: new Date().toISOString(),
   }
 
-  await fs.writeFile(filePathFor(documentId), JSON.stringify(restored, null, 2), 'utf8')
+  await writeDocument(userId, documentId, {
+    ...currentDocument,
+    ...restored,
+  })
+
   return restored
 }
 
-export const listUploads = async () => {
+export const listUploads = async (userId) => {
   await ensureUploadRoot()
-  await ensureDataRoot()
 
   const usedUploads = new Map()
-  const documentEntries = await fs.readdir(DATA_ROOT, { withFileTypes: true })
+  const { rows: documents } = await pool.query(`SELECT payload FROM documents WHERE owner_id = $1`, [userId])
 
-  for (const entry of documentEntries) {
-    if (!entry.isFile() || !entry.name.endsWith('.json')) {
-      continue
-    }
-
-    const raw = await fs.readFile(path.join(DATA_ROOT, entry.name), 'utf8')
-    const documentData = JSON.parse(raw)
-    const refs = [...collectUploadRefs(documentData)]
-
+  documents.forEach((row) => {
+    const refs = [...collectUploadRefs(row.payload)]
     refs.forEach((ref) => {
       usedUploads.set(ref, (usedUploads.get(ref) || 0) + 1)
     })
-  }
+  })
 
-  const uploads = await fs.readdir(UPLOAD_ROOT, { withFileTypes: true })
-  const items = []
+  const { rows } = await pool.query(
+    `
+      SELECT file_name AS "name", original_name AS "originalName", url, size, mime_type AS "type", created_at AS "updatedAt"
+      FROM uploads
+      WHERE owner_id = $1
+      ORDER BY created_at DESC
+    `,
+    [userId],
+  )
 
-  for (const entry of uploads) {
-    if (!entry.isFile()) {
-      continue
-    }
-
-    const filePath = path.join(UPLOAD_ROOT, entry.name)
-    const stat = await fs.stat(filePath)
-    const url = `/uploads/${entry.name}`
-    items.push({
-      name: entry.name,
-      url,
-      size: stat.size,
-      updatedAt: stat.mtime.toISOString(),
-      usedBy: usedUploads.get(url) || 0,
-    })
-  }
-
-  return items.sort((left, right) => `${right.updatedAt}`.localeCompare(`${left.updatedAt}`))
+  return rows.map((row) => ({
+    ...row,
+    usedBy: usedUploads.get(row.url) || 0,
+  }))
 }
 
-export const deleteUpload = async (fileName) => {
+export const createUpload = async (userId, upload) => {
+  await pool.query(
+    `
+      INSERT INTO uploads (owner_id, file_name, original_name, url, size, mime_type)
+      VALUES ($1, $2, $3, $4, $5, $6)
+    `,
+    [userId, upload.fileName, upload.originalName, upload.url, upload.size, upload.type],
+  )
+}
+
+export const deleteUpload = async (userId, fileName) => {
+  const { rows } = await pool.query(`SELECT owner_id FROM uploads WHERE file_name = $1`, [fileName])
+
+  if (rows.length === 0) {
+    throw new Error('Upload not found.')
+  }
+
+  ensureOwner(rows[0], userId)
+  await pool.query(`DELETE FROM uploads WHERE file_name = $1`, [fileName])
   await ensureUploadRoot()
   await fs.unlink(path.join(UPLOAD_ROOT, fileName))
 }
 
-export const cleanupUnusedUploads = async () => {
-  const uploads = await listUploads()
+export const cleanupUnusedUploads = async (userId) => {
+  const uploads = await listUploads(userId)
   const removed = []
 
   for (const upload of uploads) {
@@ -244,9 +309,33 @@ export const cleanupUnusedUploads = async () => {
       continue
     }
 
-    await deleteUpload(upload.name)
+    await deleteUpload(userId, upload.name)
     removed.push(upload.name)
   }
 
   return removed
+}
+
+export const getVersionDiff = async (userId, documentId, versionId) => {
+  const version = await readDocumentVersion(userId, documentId, versionId)
+  const current = await readDocument(userId, documentId)
+
+  const versionPages = Array.isArray(version.payload?.pages) ? version.payload.pages : []
+  const currentPages = Array.isArray(current?.pages) ? current.pages : []
+  const versionElementCount = versionPages.reduce((count, page) => count + (Array.isArray(page.elements) ? page.elements.length : 0), 0)
+  const currentElementCount = currentPages.reduce((count, page) => count + (Array.isArray(page.elements) ? page.elements.length : 0), 0)
+
+  return {
+    versionId,
+    currentTitle: current.title,
+    versionTitle: version.title,
+    currentUpdatedAt: current.updatedAt,
+    versionCreatedAt: version.createdAt,
+    pageDelta: currentPages.length - versionPages.length,
+    elementDelta: currentElementCount - versionElementCount,
+    addedPageNames: currentPages.map((page) => page.name).filter((name) => !versionPages.some((page) => page.name === name)),
+    removedPageNames: versionPages.map((page) => page.name).filter((name) => !currentPages.some((page) => page.name === name)),
+    currentPages,
+    versionPages,
+  }
 }

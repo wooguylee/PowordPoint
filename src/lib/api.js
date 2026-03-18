@@ -1,5 +1,22 @@
+const tokenKey = 'powordpointer.auth.token'
+
+export const setAuthToken = (token) => {
+  if (token) {
+    window.localStorage.setItem(tokenKey, token)
+  } else {
+    window.localStorage.removeItem(tokenKey)
+  }
+}
+
+export const getAuthToken = () => window.localStorage.getItem(tokenKey) || ''
+
 const request = async (path, options = {}) => {
   const headers = { ...(options.headers || {}) }
+  const token = getAuthToken()
+
+  if (token) {
+    headers.Authorization = `Bearer ${token}`
+  }
 
   if (!(options.body instanceof FormData)) {
     headers['Content-Type'] = 'application/json'
@@ -24,6 +41,25 @@ export const fetchDocumentLibrary = async (query = '') => {
   const suffix = query ? `?q=${encodeURIComponent(query)}` : ''
   const payload = await request(`/api/documents${suffix}`)
   return Array.isArray(payload.documents) ? payload.documents : []
+}
+
+export const registerUser = async (payload) => {
+  return request('/api/auth/register', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  })
+}
+
+export const loginUser = async (payload) => {
+  return request('/api/auth/login', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  })
+}
+
+export const fetchCurrentUser = async () => {
+  const payload = await request('/api/auth/me')
+  return payload.user
 }
 
 export const fetchDocumentById = async (documentId) => {
@@ -68,6 +104,11 @@ export const restoreDocumentVersion = async (documentId, versionId) => {
   })
 
   return payload.document
+}
+
+export const fetchVersionDiff = async (documentId, versionId) => {
+  const payload = await request(`/api/documents/${documentId}/versions/${versionId}/diff`)
+  return payload.diff
 }
 
 export const uploadImageToServer = async (file) => {
