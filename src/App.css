@@ -31,6 +31,15 @@
   border-radius: 24px;
 }
 
+.recovery-banner {
+  border-radius: 24px;
+}
+
+.recovery-block {
+  max-width: 760px;
+  margin: 0 auto;
+}
+
 .auth-block {
   max-width: 520px;
   margin: 0 auto;
@@ -149,6 +158,60 @@
   border: 1px solid rgba(29, 61, 73, 0.1);
 }
 
+.template-preview-card {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 12px;
+  border-radius: 14px;
+  background: rgba(20, 49, 59, 0.06);
+  border: 1px solid rgba(29, 61, 73, 0.1);
+}
+
+.template-preview-canvas {
+  position: relative;
+  overflow: hidden;
+  border-radius: 14px;
+  border: 1px solid rgba(29, 61, 73, 0.1);
+  background: #f8f4eb;
+}
+
+.template-preview-surface {
+  position: relative;
+  width: 100%;
+  height: 100%;
+}
+
+.template-shape {
+  position: absolute;
+  border: 1px solid rgba(29, 61, 73, 0.18);
+  border-radius: 6px;
+  overflow: hidden;
+  font-size: 8px;
+  line-height: 1.2;
+  padding: 2px;
+}
+
+.template-shape.ellipse {
+  border-radius: 999px;
+}
+
+.template-shape.arrow {
+  height: 0;
+  border-top-width: 2px;
+  border-top-style: solid;
+  border-left: none;
+  border-right: none;
+  border-bottom: none;
+  background: transparent;
+}
+
+.template-shape.text {
+  border: none;
+  background: transparent;
+  padding: 0;
+}
+
 .version-diff-card {
   display: flex;
   flex-direction: column;
@@ -174,6 +237,49 @@
   background: rgba(20, 49, 59, 0.05);
 }
 
+.mention-token,
+.tag-token {
+  padding: 0 4px;
+  border-radius: 6px;
+}
+
+.mention-token {
+  background: rgba(60, 138, 157, 0.16);
+  color: #1d6677;
+}
+
+.tag-token {
+  background: rgba(213, 111, 62, 0.16);
+  color: #9d4e25;
+}
+
+.layer-group-card {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px;
+  border-radius: 16px;
+  background: rgba(20, 49, 59, 0.05);
+}
+
+.layer-group-toggle {
+  border: none;
+  background: transparent;
+  text-align: left;
+  padding: 0;
+  cursor: pointer;
+}
+
+.layer-group-title {
+  font-size: 0.82rem;
+  text-transform: uppercase;
+  color: #5b7078;
+}
+
+.nested-layer {
+  margin-left: 10px;
+}
+
 .diff-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -184,6 +290,12 @@
   display: flex;
   flex-direction: column;
   gap: 4px;
+}
+
+.mention-suggestions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
 }
 
 .page-card.active {

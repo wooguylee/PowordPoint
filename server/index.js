@@ -15,6 +15,7 @@ import {
   createUser,
   cleanupUnusedUploads,
   createComment,
+  deleteTemplate,
   listTemplates,
   replyToComment,
   resolveComment,
@@ -347,6 +348,29 @@ router.post('/templates/seed', auth, async (ctx) => {
     await upsertTemplate(template)
   }
 
+  ctx.status = 204
+})
+
+router.put('/templates/:id', auth, async (ctx) => {
+  const payload = ctx.request.body || {}
+
+  if (!payload.title || !payload.document) {
+    sendError(ctx, 400, 'title and document are required.')
+    return
+  }
+
+  await upsertTemplate({
+    id: ctx.params.id,
+    title: payload.title,
+    description: payload.description || '',
+    document: payload.document,
+  })
+
+  ctx.status = 204
+})
+
+router.delete('/templates/:id', auth, async (ctx) => {
+  await deleteTemplate(ctx.params.id)
   ctx.status = 204
 })
 

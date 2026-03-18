@@ -64,9 +64,11 @@ import {
   requestLlmProxy,
   restoreDocumentVersion as restoreDocumentVersionApi,
   saveDocumentToServer,
+  saveTemplateOnServer,
   seedTemplatesOnServer,
   setAuthToken,
   uploadImageToServer,
+  deleteTemplateFromServer,
 } from './lib/api'
 import { normalizeLlmPayload, buildPrompts } from './lib/llm'
 import { exportDocumentToPdf } from './lib/pdf'
@@ -78,6 +80,72 @@ const defaultLlmState = {
 }
 
 const MAX_HISTORY = 80
+const AUTOSAVE_MS = 2500
+const LOCAL_RECOVERY_KEY = 'powordpointer.recovery'
+
+const extractCommentMeta = (text) => ({
+  mentions: Array.from(new Set((text.match(/@[a-zA-Z0-9_\-.]+/g) || []).map((item) => item.slice(1)))),
+  tags: Array.from(new Set((text.match(/#[a-zA-Z0-9_\-.]+/g) || []).map((item) => item.slice(1)))),
+})
+
+const renderCommentText = (text) =>
+  `${text || ''}`
+    .split(/(\s+)/)
+    .map((token, index) => {
+      if (/^@[a-zA-Z0-9_\-.]+$/.test(token)) {
+        return <mark key={`${token}-${index}`} className="mention-token">{token}</mark>
+      }
+
+      if (/^#[a-zA-Z0-9_\-.]+$/.test(token)) {
+        return <mark key={`${token}-${index}`} className="tag-token">{token}</mark>
+      }
+
+      return token
+    })
+
+const TemplatePreview = ({ template }) => {
+  const page = template?.document?.pages?.[0]
+
+  if (!page) {
+    return null
+  }
+
+  const scale = 180 / page.width
+
+  return (
+    <div className="template-preview-canvas" style={{ width: page.width * scale, height: page.height * scale }}>
+      <div className="template-preview-surface" style={{ background: page.background }}>
+        {page.elements.slice(0, 8).map((element) => {
+          const commonStyle = {
+            left: element.x * scale,
+            top: element.y * scale,
+            width: (element.width || 120) * scale,
+            height: (element.height || 60) * scale,
+            transform: `rotate(${element.rotation || 0}deg)`,
+          }
+
+          if (element.type === 'text') {
+            return (
+              <div key={element.id} className="template-shape text" style={{ ...commonStyle, color: element.fill, fontSize: Math.max(8, element.fontSize * scale * 0.55) }}>
+                {element.text}
+              </div>
+            )
+          }
+
+          if (element.type === 'ellipse') {
+            return <div key={element.id} className="template-shape ellipse" style={{ ...commonStyle, background: element.fill, borderColor: element.stroke }} />
+          }
+
+          if (element.type === 'arrow') {
+            return <div key={element.id} className="template-shape arrow" style={{ left: element.x * scale, top: element.y * scale, width: Math.max(20, Math.abs(element.width) * scale), borderTopColor: element.stroke }} />
+          }
+
+          return <div key={element.id} className={`template-shape ${element.type}`} style={{ ...commonStyle, background: element.fill || '#dce7ea', borderColor: element.stroke || '#23404d' }} />
+        })}
+      </div>
+    </div>
+  )
+}
 
 const invertHistoryEntry = (entry) => ({
   ...entry,
@@ -531,6 +599,9 @@ function App() {
   const [libraryQuery, setLibraryQuery] = useState('')
   const [libraryStatus, setLibraryStatus] = useState({ type: 'idle', message: '' })
   const [saveStatus, setSaveStatus] = useState({ type: 'idle', message: '' })
+  const [autosaveEnabled] = useState(true)
+  const [lastSavedDocument, setLastSavedDocument] = useState(null)
+  const [recoveryDraft, setRecoveryDraft] = useState(null)
   const [imageTargetId, setImageTargetId] = useState(null)
   const [textEditor, setTextEditor] = useState(null)
   const [uploads, setUploads] = useState([])
@@ -546,10 +617,29 @@ function App() {
   const [commentStatus, setCommentStatus] = useState({ type: 'idle', message: '' })
   const [commentDraft, setCommentDraft] = useState('')
   const [replyDrafts, setReplyDrafts] = useState({})
+  const [commentFilter, setCommentFilter] = useState('all')
+  const [tagFilter, setTagFilter] = useState('')
+  const [mentionSuggestions, setMentionSuggestions] = useState([])
   const [historyPast, setHistoryPast] = useState([])
   const [historyFuture, setHistoryFuture] = useState([])
   const [activeTemplateId, setActiveTemplateId] = useState('proposal')
   const [templates, setTemplates] = useState([])
+  const [templateEditor, setTemplateEditor] = useState({ title: '', description: '' })
+  const [templatePreviewId, setTemplatePreviewId] = useState('')
+  const [layerExpanded, setLayerExpanded] = useState(() => {
+    try {
+      return JSON.parse(window.localStorage.getItem('powordpointer.layerExpanded') || '{}')
+    } catch {
+      return {}
+    }
+  })
+  const [recoveryHistory, setRecoveryHistory] = useState(() => {
+    try {
+      return JSON.parse(window.localStorage.getItem('powordpointer.recovery.history') || '[]')
+    } catch {
+      return []
+    }
+  })
 
   const stageRef = useRef(null)
   const transformerRef = useRef(null)
@@ -580,6 +670,31 @@ function App() {
   useEffect(() => {
     window.localStorage.setItem(LOCAL_DRAFT_KEY, JSON.stringify(documentData))
   }, [documentData])
+
+  useEffect(() => {
+    window.localStorage.setItem('powordpointer.layerExpanded', JSON.stringify(layerExpanded))
+  }, [layerExpanded])
+
+  useEffect(() => {
+    window.localStorage.setItem('powordpointer.recovery.history', JSON.stringify(recoveryHistory))
+  }, [recoveryHistory])
+
+  useEffect(() => {
+    const raw = window.localStorage.getItem(LOCAL_RECOVERY_KEY)
+
+    if (!raw) {
+      return
+    }
+
+    try {
+      const parsed = JSON.parse(raw)
+      if (parsed?.document) {
+        setRecoveryDraft(parsed)
+      }
+    } catch {
+      return
+    }
+  }, [])
 
   useEffect(() => {
     if (!currentUser || !documentData.id) {
@@ -671,6 +786,37 @@ function App() {
   }, [currentUser, libraryQuery])
 
   useEffect(() => {
+    if (!autosaveEnabled || !currentUser || !documentData.id) {
+      return undefined
+    }
+
+    const timeout = window.setTimeout(async () => {
+      const snapshot = JSON.stringify(documentData)
+
+      if (snapshot === lastSavedDocument) {
+        return
+      }
+
+      try {
+        const saved = await saveDocumentToServer(documentData)
+        setDocumentData(saved)
+        setLastSavedDocument(JSON.stringify(saved))
+        const recoveryEntry = { updatedAt: new Date().toISOString(), document: saved }
+        window.localStorage.setItem(LOCAL_RECOVERY_KEY, JSON.stringify(recoveryEntry))
+        setRecoveryHistory((prev) => [recoveryEntry, ...prev].slice(0, 8))
+        setSaveStatus({ type: 'success', message: 'Autosaved to server.' })
+      } catch (error) {
+        setSaveStatus({
+          type: 'error',
+          message: error instanceof Error ? error.message : 'Autosave failed.',
+        })
+      }
+    }, AUTOSAVE_MS)
+
+    return () => window.clearTimeout(timeout)
+  }, [autosaveEnabled, currentUser, documentData, lastSavedDocument])
+
+  useEffect(() => {
     const loadTemplates = async () => {
       if (!currentUser) {
         setTemplates([])
@@ -689,6 +835,7 @@ function App() {
         setTemplates(nextTemplates)
         if (nextTemplates[0]) {
           setActiveTemplateId(nextTemplates[0].id)
+          setTemplatePreviewId(nextTemplates[0].id)
         }
       } catch {
         setTemplates(createTemplates())
@@ -919,6 +1066,7 @@ function App() {
     setVersions([])
     setVersionDiff(null)
     setComments([])
+    setLastSavedDocument(null)
     setAuthStatus({ type: 'idle', message: 'Signed out.' })
   }
 
@@ -965,6 +1113,60 @@ function App() {
     setHistoryPast([])
     setHistoryFuture([])
     applyLoadedDocument(nextDocument)
+  }
+
+  const handleSaveTemplate = async () => {
+    const templateId = activeTemplateId || createId('template')
+    await saveTemplateOnServer({
+      id: templateId,
+      title: templateEditor.title || documentData.title,
+      description: templateEditor.description || documentData.description,
+      document: documentData,
+    })
+    const nextTemplates = await fetchTemplates()
+    setTemplates(nextTemplates)
+    setActiveTemplateId(templateId)
+  }
+
+  const handleDeleteTemplate = async () => {
+    if (!activeTemplateId) {
+      return
+    }
+
+    await deleteTemplateFromServer(activeTemplateId)
+    const nextTemplates = await fetchTemplates()
+    setTemplates(nextTemplates)
+    setActiveTemplateId(nextTemplates[0]?.id || '')
+  }
+
+  const handleRecoverDraft = () => {
+    if (!recoveryDraft?.document) {
+      return
+    }
+
+    applyLoadedDocument(recoveryDraft.document)
+    setRecoveryDraft(null)
+    window.localStorage.removeItem(LOCAL_RECOVERY_KEY)
+  }
+
+  const handleRecoverHistoryEntry = (entry) => {
+    if (!entry?.document) {
+      return
+    }
+
+    applyLoadedDocument(entry.document)
+  }
+
+  const dismissRecoveryDraft = () => {
+    setRecoveryDraft(null)
+    window.localStorage.removeItem(LOCAL_RECOVERY_KEY)
+  }
+
+  const toggleLayerGroup = (groupId) => {
+    setLayerExpanded((prev) => ({
+      ...prev,
+      [groupId]: prev[groupId] === false ? true : false,
+    }))
   }
 
   const refreshLibrary = async () => {
@@ -1051,6 +1253,7 @@ function App() {
       setSaveStatus({ type: 'loading', message: 'Saving document to server...' })
       const saved = await saveDocumentToServer(documentData)
       setDocumentData(saved)
+      setLastSavedDocument(JSON.stringify(saved))
       setSaveStatus({ type: 'success', message: 'Saved to backend JSON storage.' })
       await refreshLibrary()
       await refreshVersions()
@@ -1067,6 +1270,7 @@ function App() {
       setLibraryStatus({ type: 'loading', message: 'Loading server document...' })
       const nextDocument = await fetchDocumentById(documentId)
       applyLoadedDocument(nextDocument)
+      setLastSavedDocument(JSON.stringify(nextDocument))
       setLibraryStatus({ type: 'success', message: 'Loaded document from server.' })
     } catch (error) {
       setLibraryStatus({
@@ -1603,6 +1807,7 @@ function App() {
 
     setComments((prev) => [comment, ...prev])
     setCommentDraft('')
+    setMentionSuggestions([])
     setCommentStatus({ type: 'success', message: 'Comment added.' })
   }
 
@@ -1610,6 +1815,53 @@ function App() {
     await deleteCommentFromServer(commentId)
     setComments((prev) => prev.filter((comment) => comment.id !== commentId))
   }
+
+  const filteredComments = comments.filter((comment) => {
+    const meta = extractCommentMeta(comment.body)
+
+    if (commentFilter === 'open') {
+      return !comment.resolved
+    }
+
+    if (commentFilter === 'page') {
+      return comment.pageId === currentPage.id
+    }
+
+    if (commentFilter === 'selection') {
+      return primarySelectedElement ? comment.elementId === primarySelectedElement.id : false
+    }
+
+    if (commentFilter === 'tag') {
+      return tagFilter ? meta.tags.includes(tagFilter) : meta.tags.length > 0
+    }
+
+    return true
+  })
+
+  const groupedLayerEntries = useMemo(() => {
+    const entries = []
+    const seenGroups = new Set()
+
+    ;[...currentPage.elements].reverse().forEach((element) => {
+      if (element.groupId) {
+        if (seenGroups.has(element.groupId)) {
+          return
+        }
+
+        seenGroups.add(element.groupId)
+        entries.push({
+          type: 'group',
+          id: element.groupId,
+          items: [...currentPage.elements].filter((item) => item.groupId === element.groupId).reverse(),
+        })
+        return
+      }
+
+      entries.push({ type: 'element', id: element.id, item: element })
+    })
+
+    return entries
+  }, [currentPage.elements])
 
   const handleReplyToComment = async (commentId) => {
     const body = replyDrafts[commentId]?.trim()
@@ -1626,6 +1878,27 @@ function App() {
   const handleResolveComment = async (commentId, resolved) => {
     const comment = await resolveCommentOnServer(commentId, resolved)
     setComments((prev) => prev.map((item) => (item.id === comment.id ? comment : item)))
+  }
+
+  const handleCommentDraftChange = (value) => {
+    setCommentDraft(value)
+    const mentionMatch = value.match(/@([a-zA-Z0-9_\-.]*)$/)
+
+    if (!mentionMatch) {
+      setMentionSuggestions([])
+      return
+    }
+
+    const query = mentionMatch[1].toLowerCase()
+    const candidates = Array.from(new Set(comments.map((comment) => comment.authorName))).filter((name) =>
+      name.toLowerCase().includes(query),
+    )
+    setMentionSuggestions(candidates.slice(0, 5))
+  }
+
+  const handleInsertMention = (name) => {
+    setCommentDraft((prev) => prev.replace(/@([a-zA-Z0-9_\-.]*)$/, `@${name} `))
+    setMentionSuggestions([])
   }
 
   const handleResetDocument = () => {
@@ -1801,6 +2074,46 @@ function App() {
         </section>
       ) : null}
 
+      {recoveryDraft ? (
+        <section className="recovery-banner panel">
+          <div className="panel-block recovery-block">
+            <div className="block-header">
+              <h2>Recovery Available</h2>
+              <span>{new Date(recoveryDraft.updatedAt).toLocaleString()}</span>
+            </div>
+            <p className="subtle">A recent autosaved draft is available to restore.</p>
+            <div className="row-actions">
+              <button className="accent-button" onClick={handleRecoverDraft}>Restore draft</button>
+              <button className="ghost-button" onClick={dismissRecoveryDraft}>Dismiss</button>
+            </div>
+          </div>
+        </section>
+      ) : null}
+
+      {recoveryHistory.length > 0 ? (
+        <section className="recovery-banner panel">
+          <div className="panel-block recovery-block">
+            <div className="block-header">
+              <h2>Recovery History</h2>
+              <span>{recoveryHistory.length}</span>
+            </div>
+            <div className="page-list server-list">
+              {recoveryHistory.map((entry, index) => (
+                <div key={`${entry.updatedAt}-${index}`} className="page-card">
+                  <div className="library-open">
+                    <strong>{entry.document?.title || 'Untitled draft'}</strong>
+                    <small>{new Date(entry.updatedAt).toLocaleString()}</small>
+                  </div>
+                  <div className="row-actions">
+                    <button className="mini-button" onClick={() => handleRecoverHistoryEntry(entry)}>Restore</button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        </section>
+      ) : null}
+
       <div className="workspace-grid">
         <aside className="left-panel panel">
           <div className="panel-block">
@@ -1838,14 +2151,39 @@ function App() {
             </div>
             <label>
               <span>Template</span>
-              <select value={activeTemplateId} onChange={(event) => setActiveTemplateId(event.target.value)}>
+              <select value={activeTemplateId} onChange={(event) => {
+                setActiveTemplateId(event.target.value)
+                setTemplatePreviewId(event.target.value)
+              }}>
                 {templates.map((template) => (
                   <option key={template.id} value={template.id}>{template.title}</option>
                 ))}
               </select>
             </label>
             <p className="subtle">{templates.find((template) => template.id === activeTemplateId)?.description}</p>
-            <button className="ghost-button" onClick={() => applyTemplate(activeTemplateId)}>Apply template</button>
+            {templates.find((template) => template.id === templatePreviewId)?.document?.pages?.[0] ? (
+              <div className="template-preview-card">
+                <strong>Preview</strong>
+                <TemplatePreview template={templates.find((template) => template.id === templatePreviewId)} />
+                <small>{templates.find((template) => template.id === templatePreviewId)?.document.pages[0].name}</small>
+                <small>
+                  {templates.find((template) => template.id === templatePreviewId)?.document.pages[0].elements.length || 0} elements on first page
+                </small>
+              </div>
+            ) : null}
+            <label>
+              <span>Template title</span>
+              <input value={templateEditor.title} onChange={(event) => setTemplateEditor((prev) => ({ ...prev, title: event.target.value }))} placeholder="Use current document title if empty" />
+            </label>
+            <label>
+              <span>Template description</span>
+              <textarea rows="3" value={templateEditor.description} onChange={(event) => setTemplateEditor((prev) => ({ ...prev, description: event.target.value }))} />
+            </label>
+            <div className="row-actions">
+              <button className="ghost-button" onClick={() => applyTemplate(activeTemplateId)}>Apply template</button>
+              <button className="ghost-button" onClick={handleSaveTemplate}>Save template</button>
+              <button className="mini-button danger" onClick={handleDeleteTemplate} disabled={!activeTemplateId}>Delete</button>
+            </div>
           </div>
 
           <div className="panel-block">
@@ -2005,25 +2343,52 @@ function App() {
               <span>{currentPage.elements.length}</span>
             </div>
             <div className="page-list server-list">
-              {[...currentPage.elements].reverse().map((element) => (
-                <div
-                  key={element.id}
-                  className={`page-card ${selectedIds.includes(element.id) ? 'active' : ''}`}
-                  draggable
-                  onDragStart={(event) => handleLayerDragStart(event, element.id)}
-                  onDragOver={(event) => event.preventDefault()}
-                  onDrop={(event) => handleLayerDrop(event, element.id)}
-                >
-                  <button className="library-open" onClick={() => setSelectedIds([element.id])}>
-                    <strong>{element.type}</strong>
-                    <small>{element.id}</small>
-                  </button>
-                  <div className="row-actions">
-                    <button className="mini-button" onClick={() => toggleLayerFlag(element.id, 'hidden')}>{element.hidden ? 'Show' : 'Hide'}</button>
-                    <button className="mini-button" onClick={() => toggleLayerFlag(element.id, 'locked')}>{element.locked ? 'Unlock' : 'Lock'}</button>
+              {groupedLayerEntries.map((entry) =>
+                entry.type === 'group' ? (
+                  <div key={entry.id} className="layer-group-card">
+                    <button className="layer-group-toggle" onClick={() => toggleLayerGroup(entry.id)}>
+                      <strong className="layer-group-title">{layerExpanded[entry.id] === false ? '[+]' : '[-]'} Group {entry.id}</strong>
+                    </button>
+                    {layerExpanded[entry.id] === false ? null : entry.items.map((element) => (
+                      <div
+                        key={element.id}
+                        className={`page-card nested-layer ${selectedIds.includes(element.id) ? 'active' : ''}`}
+                        draggable
+                        onDragStart={(event) => handleLayerDragStart(event, element.id)}
+                        onDragOver={(event) => event.preventDefault()}
+                        onDrop={(event) => handleLayerDrop(event, element.id)}
+                      >
+                        <button className="library-open" onClick={() => setSelectedIds((prev) => prev.includes(element.id) ? prev.filter((id) => id !== element.id) : [...prev, element.id])}>
+                          <strong>{element.type}</strong>
+                          <small>{element.id}</small>
+                        </button>
+                        <div className="row-actions">
+                          <button className="mini-button" onClick={() => toggleLayerFlag(element.id, 'hidden')}>{element.hidden ? 'Show' : 'Hide'}</button>
+                          <button className="mini-button" onClick={() => toggleLayerFlag(element.id, 'locked')}>{element.locked ? 'Unlock' : 'Lock'}</button>
+                        </div>
+                      </div>
+                    ))}
                   </div>
-                </div>
-              ))}
+                ) : (
+                  <div
+                    key={entry.id}
+                    className={`page-card ${selectedIds.includes(entry.item.id) ? 'active' : ''}`}
+                    draggable
+                    onDragStart={(event) => handleLayerDragStart(event, entry.item.id)}
+                    onDragOver={(event) => event.preventDefault()}
+                    onDrop={(event) => handleLayerDrop(event, entry.item.id)}
+                  >
+                    <button className="library-open" onClick={() => setSelectedIds((prev) => prev.includes(entry.item.id) ? prev.filter((id) => id !== entry.item.id) : [...prev, entry.item.id])}>
+                      <strong>{entry.item.type}</strong>
+                      <small>{entry.item.id}</small>
+                    </button>
+                    <div className="row-actions">
+                      <button className="mini-button" onClick={() => toggleLayerFlag(entry.item.id, 'hidden')}>{entry.item.hidden ? 'Show' : 'Hide'}</button>
+                      <button className="mini-button" onClick={() => toggleLayerFlag(entry.item.id, 'locked')}>{entry.item.locked ? 'Unlock' : 'Lock'}</button>
+                    </div>
+                  </div>
+                ),
+              )}
             </div>
             <div className="row-actions">
               <button className="mini-button" onClick={() => handleLayerOrder('up')}>Move up</button>
@@ -2547,21 +2912,53 @@ function App() {
             </div>
             <p className={`status-pill ${commentStatus.type}`}>{commentStatus.message || 'Idle'}</p>
             <label>
-              <span>New comment</span>
-              <textarea rows="4" value={commentDraft} onChange={(event) => setCommentDraft(event.target.value)} placeholder="Comment on the page or selected element" />
+              <span>Filter</span>
+              <select value={commentFilter} onChange={(event) => setCommentFilter(event.target.value)}>
+                <option value="all">All</option>
+                <option value="open">Open only</option>
+                <option value="page">Current page</option>
+                <option value="selection">Current selection</option>
+                <option value="tag">By tag</option>
+              </select>
             </label>
+            {commentFilter === 'tag' ? (
+              <label>
+                <span>Tag</span>
+                <input value={tagFilter} onChange={(event) => setTagFilter(event.target.value)} placeholder="tag name without #" />
+              </label>
+            ) : null}
+            <label>
+              <span>New comment</span>
+              <textarea rows="4" value={commentDraft} onChange={(event) => handleCommentDraftChange(event.target.value)} placeholder="Comment on the page or selected element" />
+            </label>
+            {mentionSuggestions.length > 0 ? (
+              <div className="mention-suggestions">
+                {mentionSuggestions.map((name) => (
+                  <button key={name} className="mini-button" onClick={() => handleInsertMention(name)}>@{name}</button>
+                ))}
+              </div>
+            ) : null}
             <div className="row-actions">
               <button className="accent-button" onClick={handleAddComment} disabled={!currentUser || !documentData.id}>Add comment</button>
               <button className="ghost-button" onClick={refreshComments} disabled={!currentUser || !documentData.id}>Refresh</button>
             </div>
             <div className="page-list server-list">
-              {comments.filter((comment) => !comment.parentId).map((comment) => (
+              {filteredComments.filter((comment) => !comment.parentId).map((comment) => (
                 <div key={comment.id} className={`page-card ${comment.resolved ? 'resolved-comment' : ''}`}>
                   <div className="library-open">
                     <strong>{comment.authorName}</strong>
                     <small>{new Date(comment.createdAt).toLocaleString()}</small>
                     <small>{comment.elementId ? `Element: ${comment.elementId}` : `Page: ${comment.pageId || currentPage.id}`}</small>
-                    <small>{comment.body}</small>
+                    <small>{renderCommentText(comment.body)}</small>
+                    <small>
+                      {(() => {
+                        const meta = extractCommentMeta(comment.body)
+                        return [
+                          meta.mentions.length > 0 ? `Mentions: ${meta.mentions.join(', ')}` : '',
+                          meta.tags.length > 0 ? `Tags: ${meta.tags.join(', ')}` : '',
+                        ].filter(Boolean).join(' | ') || 'No mentions or tags'
+                      })()}
+                    </small>
                     <small>{comment.resolved ? 'Resolved' : 'Open'}</small>
                   </div>
                   <div className="row-actions">
@@ -2577,7 +2974,7 @@ function App() {
                     <div key={reply.id} className="comment-reply">
                       <strong>{reply.authorName}</strong>
                       <small>{new Date(reply.createdAt).toLocaleString()}</small>
-                      <small>{reply.body}</small>
+                      <small>{renderCommentText(reply.body)}</small>
                     </div>
                   ))}
                 </div>

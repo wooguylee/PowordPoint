@@ -161,6 +161,19 @@ export const seedTemplatesOnServer = async (templates) => {
   })
 }
 
+export const saveTemplateOnServer = async (template) => {
+  await request(`/api/templates/${template.id}`, {
+    method: 'PUT',
+    body: JSON.stringify(template),
+  })
+}
+
+export const deleteTemplateFromServer = async (templateId) => {
+  await request(`/api/templates/${templateId}`, {
+    method: 'DELETE',
+  })
+}
+
 export const uploadImageToServer = async (file) => {
   const body = new FormData()
   body.append('image', file)

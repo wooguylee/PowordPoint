@@ -467,3 +467,7 @@ export const upsertTemplate = async (template) => {
     [template.id, template.title, template.description, JSON.stringify(template.document)],
   )
 }
+
+export const deleteTemplate = async (templateId) => {
+  await pool.query(`DELETE FROM templates WHERE id = $1`, [templateId])
+}
