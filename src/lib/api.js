@@ -125,9 +125,39 @@ export const createCommentOnServer = async (documentId, comment) => {
   return payload.comment
 }
 
+export const replyToCommentOnServer = async (documentId, commentId, body) => {
+  const payload = await request(`/api/documents/${documentId}/comments/${commentId}/replies`, {
+    method: 'POST',
+    body: JSON.stringify({ body }),
+  })
+
+  return payload.comment
+}
+
+export const resolveCommentOnServer = async (commentId, resolved) => {
+  const payload = await request(`/api/comments/${commentId}`, {
+    method: 'PATCH',
+    body: JSON.stringify({ resolved }),
+  })
+
+  return payload.comment
+}
+
 export const deleteCommentFromServer = async (commentId) => {
   await request(`/api/comments/${commentId}`, {
     method: 'DELETE',
+  })
+}
+
+export const fetchTemplates = async () => {
+  const payload = await request('/api/templates')
+  return Array.isArray(payload.templates) ? payload.templates : []
+}
+
+export const seedTemplatesOnServer = async (templates) => {
+  await request('/api/templates/seed', {
+    method: 'POST',
+    body: JSON.stringify({ templates }),
   })
 }
 

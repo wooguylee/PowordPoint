@@ -353,9 +353,11 @@ export const listComments = async (userId, documentId) => {
     `
       SELECT
         id::text AS id,
+        parent_id::text AS "parentId",
         page_id AS "pageId",
         element_id AS "elementId",
         body,
+        resolved,
         author_name AS "authorName",
         created_at AS "createdAt"
       FROM comments
@@ -382,10 +384,50 @@ export const createComment = async (userId, documentId, comment) => {
     `
       INSERT INTO comments (document_id, owner_id, author_name, page_id, element_id, body)
       VALUES ($1, $2, $3, $4, $5, $6)
-      RETURNING id::text AS id, page_id AS "pageId", element_id AS "elementId", body, author_name AS "authorName", created_at AS "createdAt"
+      RETURNING id::text AS id, parent_id::text AS "parentId", page_id AS "pageId", element_id AS "elementId", body, resolved, author_name AS "authorName", created_at AS "createdAt"
     `,
     [documentId, userId, user?.name || 'User', comment.pageId || null, comment.elementId || null, comment.body],
   )
+
+  return rows[0]
+}
+
+export const replyToComment = async (userId, documentId, parentId, body) => {
+  const { rows: documentRows } = await pool.query(`SELECT owner_id FROM documents WHERE id = $1`, [documentId])
+
+  if (documentRows.length === 0) {
+    throw new Error('Document not found.')
+  }
+
+  ensureOwner(documentRows[0], userId)
+  const user = await findUserById(userId)
+
+  const { rows } = await pool.query(
+    `
+      INSERT INTO comments (document_id, owner_id, author_name, parent_id, body)
+      VALUES ($1, $2, $3, $4, $5)
+      RETURNING id::text AS id, parent_id::text AS "parentId", page_id AS "pageId", element_id AS "elementId", body, resolved, author_name AS "authorName", created_at AS "createdAt"
+    `,
+    [documentId, userId, user?.name || 'User', Number(parentId), body],
+  )
+
+  return rows[0]
+}
+
+export const resolveComment = async (userId, commentId, resolved) => {
+  const { rows } = await pool.query(
+    `
+      UPDATE comments
+      SET resolved = $2
+      WHERE id::text = $1 AND owner_id = $3
+      RETURNING id::text AS id, parent_id::text AS "parentId", page_id AS "pageId", element_id AS "elementId", body, resolved, author_name AS "authorName", created_at AS "createdAt"
+    `,
+    [commentId, resolved, userId],
+  )
+
+  if (rows.length === 0) {
+    throw new Error('Comment not found.')
+  }
 
   return rows[0]
 }
@@ -399,4 +441,29 @@ export const deleteComment = async (userId, commentId) => {
 
   ensureOwner(rows[0], userId)
   await pool.query(`DELETE FROM comments WHERE id::text = $1`, [commentId])
+}
+
+export const listTemplates = async () => {
+  const { rows } = await pool.query(
+    `SELECT id, title, description, payload FROM templates ORDER BY created_at ASC`,
+  )
+
+  return rows.map((row) => ({
+    id: row.id,
+    title: row.title,
+    description: row.description,
+    document: row.payload,
+  }))
+}
+
+export const upsertTemplate = async (template) => {
+  await pool.query(
+    `
+      INSERT INTO templates (id, title, description, payload)
+      VALUES ($1, $2, $3, $4::jsonb)
+      ON CONFLICT (id)
+      DO UPDATE SET title = EXCLUDED.title, description = EXCLUDED.description, payload = EXCLUDED.payload
+    `,
+    [template.id, template.title, template.description, JSON.stringify(template.document)],
+  )
 }

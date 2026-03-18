@@ -15,6 +15,10 @@ import {
   createUser,
   cleanupUnusedUploads,
   createComment,
+  listTemplates,
+  replyToComment,
+  resolveComment,
+  upsertTemplate,
   deleteDocument,
   deleteComment,
   deleteUpload,
@@ -291,6 +295,30 @@ router.post('/documents/:id/comments', auth, async (ctx) => {
   }
 })
 
+router.post('/documents/:id/comments/:commentId/replies', auth, async (ctx) => {
+  const payload = ctx.request.body || {}
+
+  if (!payload.body) {
+    sendError(ctx, 400, 'Reply body is required.')
+    return
+  }
+
+  ctx.status = 201
+  ctx.body = {
+    comment: await replyToComment(ctx.state.user.id, ctx.params.id, ctx.params.commentId, payload.body),
+  }
+})
+
+router.patch('/comments/:id', auth, async (ctx) => {
+  try {
+    ctx.body = {
+      comment: await resolveComment(ctx.state.user.id, ctx.params.id, Boolean(ctx.request.body?.resolved)),
+    }
+  } catch {
+    sendError(ctx, 404, 'Comment not found.')
+  }
+})
+
 router.delete('/comments/:id', auth, async (ctx) => {
   try {
     await deleteComment(ctx.state.user.id, ctx.params.id)
@@ -306,6 +334,20 @@ router.get('/documents/:id/versions/:versionId/diff', auth, async (ctx) => {
   } catch {
     sendError(ctx, 404, 'Document version not found.')
   }
+})
+
+router.get('/templates', auth, async (ctx) => {
+  ctx.body = { templates: await listTemplates() }
+})
+
+router.post('/templates/seed', auth, async (ctx) => {
+  const templates = Array.isArray(ctx.request.body?.templates) ? ctx.request.body.templates : []
+
+  for (const template of templates) {
+    await upsertTemplate(template)
+  }
+
+  ctx.status = 204
 })
 
 router.post('/documents/:id/restore/:versionId', auth, async (ctx) => {

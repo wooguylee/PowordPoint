@@ -53,14 +53,18 @@ import {
   fetchVersionDiff,
   fetchDocumentById,
   fetchDocumentLibrary,
+  fetchTemplates,
   fetchUploads,
   getAuthToken,
   loginUser,
   renameDocumentOnServer,
+  replyToCommentOnServer,
   registerUser,
+  resolveCommentOnServer,
   requestLlmProxy,
   restoreDocumentVersion as restoreDocumentVersionApi,
   saveDocumentToServer,
+  seedTemplatesOnServer,
   setAuthToken,
   uploadImageToServer,
 } from './lib/api'
@@ -74,6 +78,12 @@ const defaultLlmState = {
 }
 
 const MAX_HISTORY = 80
+
+const invertHistoryEntry = (entry) => ({
+  ...entry,
+  nextDocument: entry.previousDocument,
+  previousDocument: entry.nextDocument,
+})
 
 const createTemplates = () => [
   {
@@ -535,11 +545,11 @@ function App() {
   const [comments, setComments] = useState([])
   const [commentStatus, setCommentStatus] = useState({ type: 'idle', message: '' })
   const [commentDraft, setCommentDraft] = useState('')
+  const [replyDrafts, setReplyDrafts] = useState({})
   const [historyPast, setHistoryPast] = useState([])
   const [historyFuture, setHistoryFuture] = useState([])
   const [activeTemplateId, setActiveTemplateId] = useState('proposal')
-
-  const templates = useMemo(() => createTemplates(), [])
+  const [templates, setTemplates] = useState([])
 
   const stageRef = useRef(null)
   const transformerRef = useRef(null)
@@ -659,6 +669,34 @@ function App() {
 
     loadLibrary()
   }, [currentUser, libraryQuery])
+
+  useEffect(() => {
+    const loadTemplates = async () => {
+      if (!currentUser) {
+        setTemplates([])
+        return
+      }
+
+      try {
+        let nextTemplates = await fetchTemplates()
+
+        if (nextTemplates.length === 0) {
+          const seeded = createTemplates()
+          await seedTemplatesOnServer(seeded)
+          nextTemplates = await fetchTemplates()
+        }
+
+        setTemplates(nextTemplates)
+        if (nextTemplates[0]) {
+          setActiveTemplateId(nextTemplates[0].id)
+        }
+      } catch {
+        setTemplates(createTemplates())
+      }
+    }
+
+    loadTemplates()
+  }, [currentUser])
 
   useEffect(() => {
     const loadUploads = async () => {
@@ -801,9 +839,16 @@ function App() {
 
   const updatePages = useCallback((updater) => {
     setDocumentData((prev) => {
-      setHistoryPast((history) => [...history.slice(-MAX_HISTORY + 1), prev])
+      const next = updateTimestamp(updater(prev))
+      setHistoryPast((history) => [
+        ...history.slice(-MAX_HISTORY + 1),
+        {
+          previousDocument: prev,
+          nextDocument: next,
+        },
+      ])
       setHistoryFuture([])
-      return updateTimestamp(updater(prev))
+      return next
     })
   }, [])
 
@@ -884,8 +929,8 @@ function App() {
       }
 
       const previous = past[past.length - 1]
-      setHistoryFuture((future) => [documentData, ...future].slice(0, MAX_HISTORY))
-      setDocumentData(previous)
+      setHistoryFuture((future) => [invertHistoryEntry(previous), ...future].slice(0, MAX_HISTORY))
+      setDocumentData(previous.previousDocument)
       return past.slice(0, -1)
     })
   }
@@ -897,8 +942,8 @@ function App() {
       }
 
       const [next, ...rest] = future
-      setHistoryPast((past) => [...past.slice(-MAX_HISTORY + 1), documentData])
-      setDocumentData(next)
+      setHistoryPast((past) => [...past.slice(-MAX_HISTORY + 1), invertHistoryEntry(next)])
+      setDocumentData(next.previousDocument)
       return rest
     })
   }
@@ -1393,6 +1438,33 @@ function App() {
     })
   }
 
+  const handleLayerDragStart = (event, elementId) => {
+    event.dataTransfer.setData('text/plain', elementId)
+  }
+
+  const handleLayerDrop = (event, targetId) => {
+    event.preventDefault()
+    const sourceId = event.dataTransfer.getData('text/plain')
+
+    if (!sourceId || sourceId === targetId) {
+      return
+    }
+
+    updateCurrentPage((page) => {
+      const elements = [...page.elements]
+      const sourceIndex = elements.findIndex((element) => element.id === sourceId)
+      const targetIndex = elements.findIndex((element) => element.id === targetId)
+
+      if (sourceIndex === -1 || targetIndex === -1) {
+        return page
+      }
+
+      const [item] = elements.splice(sourceIndex, 1)
+      elements.splice(targetIndex, 0, item)
+      return { ...page, elements }
+    })
+  }
+
   const toggleLayerFlag = (elementId, key) => {
     patchElementsByIds([elementId], (element) => ({ ...element, [key]: !element[key] }))
   }
@@ -1537,6 +1609,23 @@ function App() {
   const handleDeleteComment = async (commentId) => {
     await deleteCommentFromServer(commentId)
     setComments((prev) => prev.filter((comment) => comment.id !== commentId))
+  }
+
+  const handleReplyToComment = async (commentId) => {
+    const body = replyDrafts[commentId]?.trim()
+
+    if (!documentData.id || !body) {
+      return
+    }
+
+    const comment = await replyToCommentOnServer(documentData.id, commentId, body)
+    setComments((prev) => [comment, ...prev])
+    setReplyDrafts((prev) => ({ ...prev, [commentId]: '' }))
+  }
+
+  const handleResolveComment = async (commentId, resolved) => {
+    const comment = await resolveCommentOnServer(commentId, resolved)
+    setComments((prev) => prev.map((item) => (item.id === comment.id ? comment : item)))
   }
 
   const handleResetDocument = () => {
@@ -1917,7 +2006,14 @@ function App() {
             </div>
             <div className="page-list server-list">
               {[...currentPage.elements].reverse().map((element) => (
-                <div key={element.id} className={`page-card ${selectedIds.includes(element.id) ? 'active' : ''}`}>
+                <div
+                  key={element.id}
+                  className={`page-card ${selectedIds.includes(element.id) ? 'active' : ''}`}
+                  draggable
+                  onDragStart={(event) => handleLayerDragStart(event, element.id)}
+                  onDragOver={(event) => event.preventDefault()}
+                  onDrop={(event) => handleLayerDrop(event, element.id)}
+                >
                   <button className="library-open" onClick={() => setSelectedIds([element.id])}>
                     <strong>{element.type}</strong>
                     <small>{element.id}</small>
@@ -2459,17 +2555,31 @@ function App() {
               <button className="ghost-button" onClick={refreshComments} disabled={!currentUser || !documentData.id}>Refresh</button>
             </div>
             <div className="page-list server-list">
-              {comments.map((comment) => (
-                <div key={comment.id} className="page-card">
+              {comments.filter((comment) => !comment.parentId).map((comment) => (
+                <div key={comment.id} className={`page-card ${comment.resolved ? 'resolved-comment' : ''}`}>
                   <div className="library-open">
                     <strong>{comment.authorName}</strong>
                     <small>{new Date(comment.createdAt).toLocaleString()}</small>
                     <small>{comment.elementId ? `Element: ${comment.elementId}` : `Page: ${comment.pageId || currentPage.id}`}</small>
                     <small>{comment.body}</small>
+                    <small>{comment.resolved ? 'Resolved' : 'Open'}</small>
                   </div>
                   <div className="row-actions">
+                    <button className="mini-button" onClick={() => handleResolveComment(comment.id, !comment.resolved)}>{comment.resolved ? 'Reopen' : 'Resolve'}</button>
                     <button className="mini-button danger" onClick={() => handleDeleteComment(comment.id)}>Delete</button>
                   </div>
+                  <label>
+                    <span>Reply</span>
+                    <textarea rows="2" value={replyDrafts[comment.id] || ''} onChange={(event) => setReplyDrafts((prev) => ({ ...prev, [comment.id]: event.target.value }))} />
+                  </label>
+                  <button className="mini-button" onClick={() => handleReplyToComment(comment.id)}>Add reply</button>
+                  {comments.filter((reply) => reply.parentId === comment.id).map((reply) => (
+                    <div key={reply.id} className="comment-reply">
+                      <strong>{reply.authorName}</strong>
+                      <small>{new Date(reply.createdAt).toLocaleString()}</small>
+                      <small>{reply.body}</small>
+                    </div>
+                  ))}
                 </div>
               ))}
             </div>

@@ -88,9 +88,22 @@ export const initializeDatabase = async () => {
       document_id TEXT NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
       owner_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
       author_name TEXT NOT NULL,
+      parent_id BIGINT REFERENCES comments(id) ON DELETE CASCADE,
       page_id TEXT,
       element_id TEXT,
       body TEXT NOT NULL,
+      resolved BOOLEAN NOT NULL DEFAULT FALSE,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+  `)
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS templates (
+      id TEXT PRIMARY KEY,
+      owner_id TEXT REFERENCES users(id) ON DELETE CASCADE,
+      title TEXT NOT NULL,
+      description TEXT,
+      payload JSONB NOT NULL,
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
   `)
