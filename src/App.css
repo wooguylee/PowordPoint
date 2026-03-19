@@ -1,9 +1,18 @@
 .app-shell {
+  --ui-gap: 7;
+  --ui-padding: 9;
+  --ui-panel-padding: 11;
+  --ui-font-scale: 1;
+  --ui-tight-radius: 12px;
+}
+
+.app-shell {
   min-height: 100vh;
-  padding: 24px;
+  padding: calc(12px * var(--ui-font-scale));
   display: flex;
   flex-direction: column;
-  gap: 20px;
+  gap: calc(var(--ui-gap) * 1px);
+  font-size: calc(14px * var(--ui-font-scale));
 }
 
 .hidden-input {
@@ -20,11 +29,19 @@
 
 .topbar {
   border-radius: 28px;
-  padding: 24px 28px;
+  padding: calc(var(--ui-panel-padding) * 1px) calc((var(--ui-panel-padding) + 2) * 1px);
   display: flex;
   justify-content: space-between;
-  align-items: flex-start;
-  gap: 18px;
+  align-items: center;
+  gap: calc(var(--ui-gap) * 1px);
+}
+
+.title-row {
+  display: flex;
+  align-items: center;
+  gap: calc(var(--ui-gap) * 1px);
+  min-width: 0;
+  flex: 1;
 }
 
 .auth-panel {
@@ -58,14 +75,14 @@
 .row-actions,
 .canvas-meta {
   display: flex;
-  gap: 10px;
+  gap: calc(var(--ui-gap) * 1px);
   flex-wrap: wrap;
 }
 
 .workspace-grid {
   display: grid;
   grid-template-columns: 290px minmax(0, 1fr) 360px;
-  gap: 18px;
+  gap: calc((var(--ui-gap) + 4) * 1px);
   min-height: 0;
 }
 
@@ -76,27 +93,27 @@
 
 .left-panel,
 .right-panel {
-  padding: 18px;
+  padding: calc(var(--ui-panel-padding) * 1px);
   display: flex;
   flex-direction: column;
-  gap: 16px;
+  gap: calc((var(--ui-gap) + 2) * 1px);
 }
 
 .canvas-panel {
-  padding: 20px;
+  padding: calc((var(--ui-panel-padding) + 2) * 1px);
   display: flex;
   flex-direction: column;
-  gap: 18px;
+  gap: calc((var(--ui-gap) + 4) * 1px);
 }
 
 .panel-block {
   background: rgba(255, 255, 255, 0.62);
   border: 1px solid rgba(33, 70, 82, 0.1);
-  border-radius: 20px;
-  padding: 16px;
+  border-radius: var(--ui-tight-radius);
+  padding: calc(var(--ui-panel-padding) * 1px);
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: calc(var(--ui-gap) * 1px);
 }
 
 .block-header,
@@ -104,7 +121,7 @@
   display: flex;
   justify-content: space-between;
   align-items: baseline;
-  gap: 12px;
+  gap: calc(var(--ui-gap) * 1px);
 }
 
 .canvas-toolbar h2,
@@ -115,7 +132,7 @@
 .page-list {
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: calc(var(--ui-gap) * 1px);
   max-height: 320px;
   overflow: auto;
 }
@@ -128,13 +145,13 @@
   text-align: left;
   border: 1px solid rgba(29, 61, 73, 0.14);
   background: linear-gradient(135deg, rgba(237, 246, 246, 0.9), rgba(255, 246, 237, 0.92));
-  border-radius: 18px;
-  padding: 14px 14px 14px 48px;
+  border-radius: var(--ui-tight-radius);
+  padding: calc((var(--ui-padding) + 2) * 1px) calc((var(--ui-padding) + 2) * 1px) calc((var(--ui-padding) + 2) * 1px) 42px;
   position: relative;
   cursor: pointer;
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: 2px;
 }
 
 .library-open {
@@ -320,7 +337,7 @@
 .tool-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 10px;
+  gap: calc(var(--ui-gap) * 1px);
 }
 
 .tool-grid.compact {
@@ -332,8 +349,8 @@
 .mini-button,
 .accent-button {
   border: none;
-  border-radius: 14px;
-  padding: 12px 14px;
+  border-radius: var(--ui-tight-radius);
+  padding: calc(var(--ui-padding) * 1px) calc((var(--ui-padding) + 2) * 1px);
   font: inherit;
   cursor: pointer;
   transition:
@@ -388,11 +405,11 @@
   flex: 1;
   min-height: 60vh;
   overflow: auto;
-  border-radius: 24px;
+  border-radius: 18px;
   background:
     radial-gradient(circle at top left, rgba(214, 111, 62, 0.14), transparent 30%),
     linear-gradient(180deg, rgba(226, 235, 237, 0.72), rgba(244, 237, 226, 0.92));
-  padding: 22px;
+  padding: calc((var(--ui-panel-padding) + 2) * 1px);
 }
 
 .canvas-frame {
@@ -404,23 +421,54 @@
   position: absolute;
   z-index: 20;
   resize: none;
-  border-radius: 12px;
+  border-radius: var(--ui-tight-radius);
   border: 1px solid rgba(213, 111, 62, 0.58);
   background: rgba(255, 252, 247, 0.96);
   box-shadow: 0 18px 40px rgba(16, 35, 44, 0.18);
-  padding: 10px 12px;
+  padding: calc(var(--ui-padding) * 1px);
   transform-origin: top left;
 }
 
 .title-input {
-  width: min(620px, 100%);
+  width: min(420px, 100%);
   background: transparent;
   border: none;
   padding: 0;
-  margin: 4px 0 10px;
+  margin: 0;
   color: #10232c;
-  font-size: clamp(1.8rem, 2.4vw, 3rem);
+  font-size: calc(1.2rem * var(--ui-font-scale));
   font-weight: 700;
+}
+
+.title-subtle {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 420px;
+}
+
+.language-picker {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.slider-row {
+  display: flex;
+  align-items: center;
+  gap: calc(var(--ui-gap) * 1px);
+}
+
+.slider-row input[type='range'] {
+  flex: 1;
+  padding: 0;
+}
+
+.range-value {
+  min-width: 3.5rem;
+  text-align: right;
+  color: #50666e;
+  font-size: calc(0.82rem * var(--ui-font-scale));
 }
 
 .title-input:focus {
@@ -440,7 +488,7 @@ label span {
 .eyebrow {
   margin: 0;
   text-transform: uppercase;
-  font-size: 0.78rem;
+  font-size: calc(0.78rem * var(--ui-font-scale));
   color: #b4673f;
 }
 
@@ -450,14 +498,14 @@ label span {
 }
 
 .subtle.tiny {
-  font-size: 0.82rem;
+  font-size: calc(0.82rem * var(--ui-font-scale));
 }
 
 .status-pill {
   margin: 0;
-  padding: 10px 12px;
-  border-radius: 12px;
-  font-size: 0.92rem;
+  padding: calc(var(--ui-padding) * 1px);
+  border-radius: var(--ui-tight-radius);
+  font-size: calc(0.92rem * var(--ui-font-scale));
 }
 
 .status-pill.idle {
@@ -482,17 +530,17 @@ label span {
 .inspector-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 10px;
+  gap: calc(var(--ui-gap) * 1px);
 }
 
 label {
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 4px;
 }
 
 label span {
-  font-size: 0.82rem;
+  font-size: calc(0.82rem * var(--ui-font-scale));
   color: #50666e;
   text-transform: uppercase;
 }
@@ -502,9 +550,9 @@ textarea,
 select {
   width: 100%;
   box-sizing: border-box;
-  border-radius: 14px;
+  border-radius: var(--ui-tight-radius);
   border: 1px solid rgba(25, 49, 59, 0.14);
-  padding: 12px 14px;
+  padding: calc(var(--ui-padding) * 1px);
   font: inherit;
   color: #10232c;
   background: rgba(255, 252, 247, 0.86);
@@ -533,7 +581,7 @@ select:focus {
 
 @media (max-width: 900px) {
   .app-shell {
-    padding: 14px;
+    padding: calc((var(--ui-padding) + 4) * 1px);
   }
 
   .topbar {
@@ -547,7 +595,7 @@ select:focus {
   .left-panel,
   .right-panel,
   .canvas-panel {
-    padding: 14px;
+    padding: calc((var(--ui-padding) + 4) * 1px);
   }
 
   .tool-grid,
@@ -565,6 +613,6 @@ select:focus {
   }
 
   .canvas-shell {
-    padding: 14px;
+    padding: calc((var(--ui-padding) + 4) * 1px);
   }
 }

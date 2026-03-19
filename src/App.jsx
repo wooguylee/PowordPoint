@@ -72,6 +72,7 @@ import {
 } from './lib/api'
 import { normalizeLlmPayload, buildPrompts } from './lib/llm'
 import { exportDocumentToPdf } from './lib/pdf'
+import { LANGUAGE_STORAGE_KEY, formatDateTime, translate } from './lib/i18n'
 
 const defaultLlmState = {
   apiKey: '',
@@ -82,6 +83,13 @@ const defaultLlmState = {
 const MAX_HISTORY = 80
 const AUTOSAVE_MS = 2500
 const LOCAL_RECOVERY_KEY = 'powordpointer.recovery'
+const LOCAL_ELEMENT_DEFAULTS_KEY = 'powordpointer.elementDefaults'
+const LOCAL_UI_SETTINGS_KEY = 'powordpointer.uiSettings'
+
+const defaultUiSettings = {
+  density: 0.85,
+  fontScale: 1,
+}
 
 const extractCommentMeta = (text) => ({
   mentions: Array.from(new Set((text.match(/@[a-zA-Z0-9_\-.]+/g) || []).map((item) => item.slice(1)))),
@@ -221,6 +229,44 @@ const createTemplates = () => [
     }),
   },
 ]
+
+const readElementDefaults = () => {
+  try {
+    return {
+      textWidth: 360,
+      textHeight: 120,
+      shapeWidth: 220,
+      shapeHeight: 140,
+      arrowWidth: 240,
+      tableWidth: 420,
+      tableHeight: 240,
+      ...(JSON.parse(window.localStorage.getItem(LOCAL_ELEMENT_DEFAULTS_KEY) || '{}')),
+    }
+  } catch {
+    return {
+      textWidth: 360,
+      textHeight: 120,
+      shapeWidth: 220,
+      shapeHeight: 140,
+      arrowWidth: 240,
+      tableWidth: 420,
+      tableHeight: 240,
+    }
+  }
+}
+
+const clamp = (value, min, max) => Math.min(max, Math.max(min, value))
+
+const readUiSettings = () => {
+  try {
+    return {
+      ...defaultUiSettings,
+      ...(JSON.parse(window.localStorage.getItem(LOCAL_UI_SETTINGS_KEY) || '{}')),
+    }
+  } catch {
+    return defaultUiSettings
+  }
+}
 
 const snapTolerance = 8
 const gridSize = 24
@@ -586,6 +632,9 @@ function App() {
   const [documentData, setDocumentData] = useState(initialDocument)
   const [currentPageId, setCurrentPageId] = useState(initialDocument.pages[0].id)
   const [selectedIds, setSelectedIds] = useState([])
+  const [language, setLanguage] = useState(() => window.localStorage.getItem(LANGUAGE_STORAGE_KEY) || 'ko')
+  const [elementDefaults, setElementDefaults] = useState(() => readElementDefaults())
+  const [uiSettings, setUiSettings] = useState(() => readUiSettings())
   const [activeTool, setActiveTool] = useState('select')
   const [drawingState, setDrawingState] = useState(null)
   const [selectionBox, setSelectionBox] = useState(null)
@@ -626,6 +675,7 @@ function App() {
   const [templates, setTemplates] = useState([])
   const [templateEditor, setTemplateEditor] = useState({ title: '', description: '' })
   const [templatePreviewId, setTemplatePreviewId] = useState('')
+  const [recoveryExpanded, setRecoveryExpanded] = useState(false)
   const [layerExpanded, setLayerExpanded] = useState(() => {
     try {
       return JSON.parse(window.localStorage.getItem('powordpointer.layerExpanded') || '{}')
@@ -667,9 +717,36 @@ function App() {
     return Math.min(1, maxWidth / currentPage.width)
   }, [currentPage.width, viewportWidth])
 
+  const uiMetrics = useMemo(() => {
+    const density = clamp(Number(uiSettings.density) || defaultUiSettings.density, 0.7, 1.2)
+    const fontScale = clamp(Number(uiSettings.fontScale) || defaultUiSettings.fontScale, 0.85, 1.3)
+
+    return {
+      gap: Math.max(4, Math.round(8 * density)),
+      padding: Math.max(6, Math.round(10 * density)),
+      panelPadding: Math.max(8, Math.round(12 * density)),
+      tightRadius: `${Math.max(10, Math.round(12 * density))}px`,
+      fontScale,
+    }
+  }, [uiSettings])
+
+  const t = useCallback((key, vars) => translate(language, key, vars), [language])
+
   useEffect(() => {
     window.localStorage.setItem(LOCAL_DRAFT_KEY, JSON.stringify(documentData))
   }, [documentData])
+
+  useEffect(() => {
+    window.localStorage.setItem(LANGUAGE_STORAGE_KEY, language)
+  }, [language])
+
+  useEffect(() => {
+    window.localStorage.setItem(LOCAL_ELEMENT_DEFAULTS_KEY, JSON.stringify(elementDefaults))
+  }, [elementDefaults])
+
+  useEffect(() => {
+    window.localStorage.setItem(LOCAL_UI_SETTINGS_KEY, JSON.stringify(uiSettings))
+  }, [uiSettings])
 
   useEffect(() => {
     window.localStorage.setItem('powordpointer.layerExpanded', JSON.stringify(layerExpanded))
@@ -704,10 +781,10 @@ function App() {
 
     const loadComments = async () => {
       try {
-        setCommentStatus({ type: 'loading', message: 'Loading comments...' })
+        setCommentStatus({ type: 'loading', message: t('status.loadingComments') })
         const nextComments = await fetchComments(documentData.id)
         setComments(nextComments)
-        setCommentStatus({ type: 'success', message: 'Comments ready.' })
+        setCommentStatus({ type: 'success', message: t('status.commentsReady') })
       } catch (error) {
         setCommentStatus({
           type: 'error',
@@ -717,7 +794,7 @@ function App() {
     }
 
     loadComments()
-  }, [currentUser, documentData.id])
+  }, [currentUser, documentData.id, t])
 
   useEffect(() => {
     window.localStorage.setItem(LOCAL_LLM_KEY, JSON.stringify(llmConfig))
@@ -753,14 +830,14 @@ function App() {
       try {
         const user = await fetchCurrentUser()
         setCurrentUser(user)
-        setAuthStatus({ type: 'success', message: `Signed in as ${user.name}.` })
+        setAuthStatus({ type: 'success', message: translate(language, 'status.signedInAs', { name: user.name }) })
       } catch {
         setAuthToken('')
       }
     }
 
     loadSession()
-  }, [])
+  }, [language])
 
   useEffect(() => {
     const loadLibrary = async () => {
@@ -770,10 +847,10 @@ function App() {
       }
 
       try {
-        setLibraryStatus({ type: 'loading', message: 'Loading server documents...' })
+        setLibraryStatus({ type: 'loading', message: t('status.loadingDocs') })
         const documents = await fetchDocumentLibrary(libraryQuery)
         setLibrary(documents)
-        setLibraryStatus({ type: 'success', message: 'Server library ready.' })
+        setLibraryStatus({ type: 'success', message: t('status.docsReady') })
       } catch (error) {
         setLibraryStatus({
           type: 'error',
@@ -783,7 +860,7 @@ function App() {
     }
 
     loadLibrary()
-  }, [currentUser, libraryQuery])
+  }, [currentUser, libraryQuery, t])
 
   useEffect(() => {
     if (!autosaveEnabled || !currentUser || !documentData.id) {
@@ -804,7 +881,7 @@ function App() {
         const recoveryEntry = { updatedAt: new Date().toISOString(), document: saved }
         window.localStorage.setItem(LOCAL_RECOVERY_KEY, JSON.stringify(recoveryEntry))
         setRecoveryHistory((prev) => [recoveryEntry, ...prev].slice(0, 8))
-        setSaveStatus({ type: 'success', message: 'Autosaved to server.' })
+        setSaveStatus({ type: 'success', message: t('status.autosaved') })
       } catch (error) {
         setSaveStatus({
           type: 'error',
@@ -814,7 +891,7 @@ function App() {
     }, AUTOSAVE_MS)
 
     return () => window.clearTimeout(timeout)
-  }, [autosaveEnabled, currentUser, documentData, lastSavedDocument])
+  }, [autosaveEnabled, currentUser, documentData, lastSavedDocument, t])
 
   useEffect(() => {
     const loadTemplates = async () => {
@@ -853,10 +930,10 @@ function App() {
       }
 
       try {
-        setUploadStatus({ type: 'loading', message: 'Loading uploads...' })
+        setUploadStatus({ type: 'loading', message: t('status.loadingUploads') })
         const nextUploads = await fetchUploads()
         setUploads(nextUploads)
-        setUploadStatus({ type: 'success', message: 'Upload library ready.' })
+        setUploadStatus({ type: 'success', message: t('status.uploadsReady') })
       } catch (error) {
         setUploadStatus({
           type: 'error',
@@ -866,7 +943,7 @@ function App() {
     }
 
     loadUploads()
-  }, [currentUser])
+  }, [currentUser, t])
 
   useEffect(() => {
     const loadVersions = async () => {
@@ -876,10 +953,10 @@ function App() {
       }
 
       try {
-        setVersionStatus({ type: 'loading', message: 'Loading version history...' })
+        setVersionStatus({ type: 'loading', message: t('status.loadingVersions') })
         const nextVersions = await fetchDocumentVersions(documentData.id)
         setVersions(nextVersions)
-        setVersionStatus({ type: 'success', message: 'Version history ready.' })
+        setVersionStatus({ type: 'success', message: t('status.versionsReady') })
       } catch (error) {
         setVersionStatus({
           type: 'error',
@@ -889,7 +966,7 @@ function App() {
     }
 
     loadVersions()
-  }, [currentUser, documentData.id, documentData.updatedAt])
+  }, [currentUser, documentData.id, documentData.updatedAt, t])
 
   useEffect(() => {
     const transformer = transformerRef.current
@@ -923,6 +1000,45 @@ function App() {
     transformer.nodes([])
     transformer.getLayer()?.batchDraw()
   }, [selectedElements])
+
+  const updatePages = useCallback((updater) => {
+    setDocumentData((prev) => {
+      const next = updateTimestamp(updater(prev))
+      setHistoryPast((history) => [
+        ...history.slice(-MAX_HISTORY + 1),
+        {
+          previousDocument: prev,
+          nextDocument: next,
+        },
+      ])
+      setHistoryFuture([])
+      return next
+    })
+  }, [])
+
+  const updateCurrentPage = useCallback((pageUpdater) => {
+    updatePages((prev) => ({
+      ...prev,
+      pages: prev.pages.map((page) => (page.id === currentPage.id ? pageUpdater(page) : page)),
+    }))
+  }, [currentPage.id, updatePages])
+
+  const replaceCurrentElements = (elements) => {
+    updateCurrentPage((page) => ({ ...page, elements }))
+  }
+
+  const patchElementsByIds = useCallback((elementIds, updater) => {
+    updateCurrentPage((page) => ({
+      ...page,
+      elements: page.elements.map((element) => {
+        if (!elementIds.includes(element.id)) {
+          return element
+        }
+
+        return sanitizeElement(updater(element), element)
+      }),
+    }))
+  }, [updateCurrentPage])
 
   useEffect(() => {
     const handleKeyDown = (event) => {
@@ -976,52 +1092,12 @@ function App() {
       if ((event.ctrlKey || event.metaKey) && event.shiftKey && event.key.toLowerCase() === 'g' && selectedIds.length > 0) {
         event.preventDefault()
         patchElementsByIds(selectedIds, (element) => ({ ...element, groupId: null }))
-        return
       }
     }
 
     window.addEventListener('keydown', handleKeyDown)
     return () => window.removeEventListener('keydown', handleKeyDown)
   }, [currentPage.id, patchElementsByIds, selectedElements, selectedIds, textEditor, updateCurrentPage])
-
-  const updatePages = useCallback((updater) => {
-    setDocumentData((prev) => {
-      const next = updateTimestamp(updater(prev))
-      setHistoryPast((history) => [
-        ...history.slice(-MAX_HISTORY + 1),
-        {
-          previousDocument: prev,
-          nextDocument: next,
-        },
-      ])
-      setHistoryFuture([])
-      return next
-    })
-  }, [])
-
-  const updateCurrentPage = useCallback((pageUpdater) => {
-    updatePages((prev) => ({
-      ...prev,
-      pages: prev.pages.map((page) => (page.id === currentPage.id ? pageUpdater(page) : page)),
-    }))
-  }, [currentPage.id, updatePages])
-
-  const replaceCurrentElements = (elements) => {
-    updateCurrentPage((page) => ({ ...page, elements }))
-  }
-
-  const patchElementsByIds = useCallback((elementIds, updater) => {
-    updateCurrentPage((page) => ({
-      ...page,
-      elements: page.elements.map((element) => {
-        if (!elementIds.includes(element.id)) {
-          return element
-        }
-
-        return sanitizeElement(updater(element), element)
-      }),
-    }))
-  }, [updateCurrentPage])
 
   const registerRef = (id) => (node) => {
     if (node) {
@@ -1067,7 +1143,7 @@ function App() {
     setVersionDiff(null)
     setComments([])
     setLastSavedDocument(null)
-    setAuthStatus({ type: 'idle', message: 'Signed out.' })
+    setAuthStatus({ type: 'idle', message: t('status.signedOut') })
   }
 
   const handleUndo = () => {
@@ -1173,7 +1249,7 @@ function App() {
     try {
       const documents = await fetchDocumentLibrary(libraryQuery)
       setLibrary(documents)
-      setLibraryStatus({ type: 'success', message: 'Server library refreshed.' })
+      setLibraryStatus({ type: 'success', message: t('status.libraryRefreshed') })
     } catch (error) {
       setLibraryStatus({
         type: 'error',
@@ -1186,7 +1262,7 @@ function App() {
     try {
       const nextUploads = await fetchUploads()
       setUploads(nextUploads)
-      setUploadStatus({ type: 'success', message: 'Upload library refreshed.' })
+      setUploadStatus({ type: 'success', message: t('status.uploadsRefreshed') })
     } catch (error) {
       setUploadStatus({
         type: 'error',
@@ -1204,7 +1280,7 @@ function App() {
     try {
       const nextVersions = await fetchDocumentVersions(documentData.id)
       setVersions(nextVersions)
-      setVersionStatus({ type: 'success', message: 'Version history refreshed.' })
+      setVersionStatus({ type: 'success', message: t('status.versionsRefreshed') })
     } catch (error) {
       setVersionStatus({
         type: 'error',
@@ -1222,7 +1298,7 @@ function App() {
     try {
       const nextComments = await fetchComments(documentData.id)
       setComments(nextComments)
-      setCommentStatus({ type: 'success', message: 'Comments refreshed.' })
+      setCommentStatus({ type: 'success', message: t('status.commentsRefreshed') })
     } catch (error) {
       setCommentStatus({
         type: 'error',
@@ -1250,11 +1326,11 @@ function App() {
 
   const saveServerDocument = async () => {
     try {
-      setSaveStatus({ type: 'loading', message: 'Saving document to server...' })
+      setSaveStatus({ type: 'loading', message: t('status.savingDoc') })
       const saved = await saveDocumentToServer(documentData)
       setDocumentData(saved)
       setLastSavedDocument(JSON.stringify(saved))
-      setSaveStatus({ type: 'success', message: 'Saved to backend JSON storage.' })
+      setSaveStatus({ type: 'success', message: t('status.savedDoc') })
       await refreshLibrary()
       await refreshVersions()
     } catch (error) {
@@ -1267,11 +1343,11 @@ function App() {
 
   const loadServerDocument = async (documentId) => {
     try {
-      setLibraryStatus({ type: 'loading', message: 'Loading server document...' })
+      setLibraryStatus({ type: 'loading', message: t('status.loadingDoc') })
       const nextDocument = await fetchDocumentById(documentId)
       applyLoadedDocument(nextDocument)
       setLastSavedDocument(JSON.stringify(nextDocument))
-      setLibraryStatus({ type: 'success', message: 'Loaded document from server.' })
+      setLibraryStatus({ type: 'success', message: t('status.loadedDoc') })
     } catch (error) {
       setLibraryStatus({
         type: 'error',
@@ -1411,7 +1487,10 @@ function App() {
     }
 
     if (activeTool === 'text') {
-      const element = createTextElement(point.x, point.y)
+      const element = createTextElement(point.x, point.y, {
+        width: elementDefaults.textWidth,
+        height: elementDefaults.textHeight,
+      })
       updateCurrentPage((page) => ({ ...page, elements: [...page.elements, element] }))
       setSelectedIds([element.id])
       setTimeout(() => openTextEditor(element), 0)
@@ -1419,7 +1498,10 @@ function App() {
     }
 
     if (activeTool === 'table') {
-      const element = createTableElement(point.x, point.y)
+      const element = createTableElement(point.x, point.y, {
+        width: elementDefaults.tableWidth,
+        height: elementDefaults.tableHeight,
+      })
       updateCurrentPage((page) => ({ ...page, elements: [...page.elements, element] }))
       setSelectedIds([element.id])
       return
@@ -1610,12 +1692,21 @@ function App() {
 
     const element =
       preset === 'text'
-        ? createTextElement(anchorX, anchorY)
+        ? createTextElement(anchorX, anchorY, {
+            width: elementDefaults.textWidth,
+            height: elementDefaults.textHeight,
+          })
         : preset === 'rect' || preset === 'ellipse'
-          ? createShapeElement(preset, anchorX, anchorY)
+          ? createShapeElement(preset, anchorX, anchorY, {
+              width: elementDefaults.shapeWidth,
+              height: elementDefaults.shapeHeight,
+            })
           : preset === 'arrow'
-            ? createArrowElement(anchorX, anchorY)
-            : createTableElement(anchorX, anchorY)
+            ? createArrowElement(anchorX, anchorY, { width: elementDefaults.arrowWidth })
+            : createTableElement(anchorX, anchorY, {
+                width: elementDefaults.tableWidth,
+                height: elementDefaults.tableHeight,
+              })
 
     updateCurrentPage((page) => ({ ...page, elements: [...page.elements, element] }))
     setSelectedIds([element.id])
@@ -1780,7 +1871,7 @@ function App() {
 
     const restored = await restoreDocumentVersionApi(documentData.id, versionId)
     applyLoadedDocument(restored)
-    setVersionStatus({ type: 'success', message: 'Version restored.' })
+    setVersionStatus({ type: 'success', message: t('status.versionRestored') })
     await refreshLibrary()
     await refreshVersions()
   }
@@ -1808,7 +1899,7 @@ function App() {
     setComments((prev) => [comment, ...prev])
     setCommentDraft('')
     setMentionSuggestions([])
-    setCommentStatus({ type: 'success', message: 'Comment added.' })
+    setCommentStatus({ type: 'success', message: t('status.commentAdded') })
   }
 
   const handleDeleteComment = async (commentId) => {
@@ -1906,19 +1997,23 @@ function App() {
     applyLoadedDocument(nextDocument)
   }
 
+  const handleResetUiSettings = () => {
+    setUiSettings(defaultUiSettings)
+  }
+
   const handleLlmRun = async () => {
     if (!llmConfig.apiKey.trim()) {
-      setLlmStatus({ type: 'error', message: 'Add an API key for the backend proxy request.' })
+      setLlmStatus({ type: 'error', message: t('status.llmNeedKey') })
       return
     }
 
     if (llmAction === 'selection' && selectedElements.length === 0) {
-      setLlmStatus({ type: 'error', message: 'Select one or more elements first.' })
+      setLlmStatus({ type: 'error', message: t('status.llmNeedSelection') })
       return
     }
 
     try {
-      setLlmStatus({ type: 'loading', message: 'Generating canvas content...' })
+      setLlmStatus({ type: 'loading', message: t('status.llmLoading') })
       const { system, user } = buildPrompts({
         mode: llmAction,
         prompt: llmPrompt,
@@ -1986,7 +2081,7 @@ function App() {
         setSelectedIds(elements.map((element) => element.id))
       }
 
-      setLlmStatus({ type: 'success', message: 'AI result applied.' })
+      setLlmStatus({ type: 'success', message: t('status.llmApplied') })
     } catch (error) {
       setLlmStatus({
         type: 'error',
@@ -2012,32 +2107,48 @@ function App() {
   ]
 
   return (
-    <div className="app-shell">
+    <div
+      className="app-shell"
+      style={{
+        '--ui-gap': uiMetrics.gap,
+        '--ui-padding': uiMetrics.padding,
+        '--ui-panel-padding': uiMetrics.panelPadding,
+        '--ui-font-scale': uiMetrics.fontScale,
+        '--ui-tight-radius': uiMetrics.tightRadius,
+      }}
+    >
       <input ref={imageInputRef} type="file" accept="image/*" className="hidden-input" onChange={handleImageImport} />
       <input ref={documentInputRef} type="file" accept="application/json,.json,.poword.json" className="hidden-input" onChange={loadDocumentJson} />
 
       <header className="topbar">
-        <div>
+        <div className="title-row">
           <p className="eyebrow">PowordPointer</p>
           <input
             className="title-input"
             value={documentData.title}
             onChange={(event) => setDocumentData((prev) => updateTimestamp({ ...prev, title: event.target.value }))}
           />
-          <p className="subtle">Canvas documents, inline text editing, PDF export, snap, align, group, and Koa-backed JSON storage.</p>
+          <p className="subtle title-subtle">{t('ui.subtitle')}</p>
         </div>
         <div className="header-actions">
-          <button className="ghost-button" onClick={handleUndo} disabled={historyPast.length === 0}>Undo</button>
-          <button className="ghost-button" onClick={handleRedo} disabled={historyFuture.length === 0}>Redo</button>
+          <label className="language-picker">
+            <span>{t('ui.language')}</span>
+            <select value={language} onChange={(event) => setLanguage(event.target.value)}>
+              <option value="ko">{t('ui.korean')}</option>
+              <option value="en">{t('ui.english')}</option>
+            </select>
+          </label>
+          <button className="ghost-button" onClick={handleUndo} disabled={historyPast.length === 0}>{t('ui.undo')}</button>
+          <button className="ghost-button" onClick={handleRedo} disabled={historyFuture.length === 0}>{t('ui.redo')}</button>
           {currentUser ? <span className="user-badge">{currentUser.name}</span> : null}
-          <button className="ghost-button" onClick={() => documentInputRef.current?.click()}>Import JSON</button>
-          <button className="ghost-button" onClick={saveDocumentJson}>Export JSON</button>
-          <button className="ghost-button" onClick={saveServerDocument} disabled={!currentUser}>Save Server</button>
-          <button className="ghost-button" onClick={handleExportPng}>Export PNG</button>
-          <button className="ghost-button" onClick={handleExportPdf}>Export PDF</button>
-          <button className="accent-button" onClick={handleResetDocument}>New document</button>
+          <button className="ghost-button" onClick={() => documentInputRef.current?.click()}>{t('ui.importJson')}</button>
+          <button className="ghost-button" onClick={saveDocumentJson}>{t('ui.exportJson')}</button>
+          <button className="ghost-button" onClick={saveServerDocument} disabled={!currentUser}>{t('ui.saveServer')}</button>
+          <button className="ghost-button" onClick={handleExportPng}>{t('ui.exportPng')}</button>
+          <button className="ghost-button" onClick={handleExportPdf}>{t('ui.exportPdf')}</button>
+          <button className="accent-button" onClick={handleResetDocument}>{t('ui.newDocument')}</button>
           {currentUser ? (
-            <button className="ghost-button" onClick={handleLogout}>Logout</button>
+            <button className="ghost-button" onClick={handleLogout}>{t('ui.logout')}</button>
           ) : null}
         </div>
       </header>
@@ -2046,70 +2157,30 @@ function App() {
         <section className="auth-panel panel">
           <div className="panel-block auth-block">
             <div className="block-header">
-              <h2>{authMode === 'login' ? 'Sign In' : 'Register'}</h2>
-              <span>Auth required for server sync</span>
+              <h2>{authMode === 'login' ? t('ui.login') : t('ui.register')}</h2>
+              <span>{t('ui.authRequired')}</span>
             </div>
             <label>
-              <span>Email</span>
+              <span>{t('ui.email')}</span>
               <input value={authForm.email} onChange={(event) => setAuthForm((prev) => ({ ...prev, email: event.target.value }))} />
             </label>
             {authMode === 'register' ? (
               <label>
-                <span>Name</span>
+                <span>{t('ui.name')}</span>
                 <input value={authForm.name} onChange={(event) => setAuthForm((prev) => ({ ...prev, name: event.target.value }))} />
               </label>
             ) : null}
             <label>
-              <span>Password</span>
+              <span>{t('ui.password')}</span>
               <input type="password" value={authForm.password} onChange={(event) => setAuthForm((prev) => ({ ...prev, password: event.target.value }))} />
             </label>
             <div className="row-actions">
-              <button className="accent-button" onClick={handleAuthSubmit}>{authMode === 'login' ? 'Login' : 'Create account'}</button>
+              <button className="accent-button" onClick={handleAuthSubmit}>{authMode === 'login' ? t('ui.login') : t('ui.register')}</button>
               <button className="ghost-button" onClick={() => setAuthMode((prev) => (prev === 'login' ? 'register' : 'login'))}>
-                {authMode === 'login' ? 'Need account?' : 'Have account?'}
+                {authMode === 'login' ? t('ui.needAccount') : t('ui.haveAccount')}
               </button>
             </div>
-            <p className={`status-pill ${authStatus.type}`}>{authStatus.message || 'Enter credentials to continue.'}</p>
-          </div>
-        </section>
-      ) : null}
-
-      {recoveryDraft ? (
-        <section className="recovery-banner panel">
-          <div className="panel-block recovery-block">
-            <div className="block-header">
-              <h2>Recovery Available</h2>
-              <span>{new Date(recoveryDraft.updatedAt).toLocaleString()}</span>
-            </div>
-            <p className="subtle">A recent autosaved draft is available to restore.</p>
-            <div className="row-actions">
-              <button className="accent-button" onClick={handleRecoverDraft}>Restore draft</button>
-              <button className="ghost-button" onClick={dismissRecoveryDraft}>Dismiss</button>
-            </div>
-          </div>
-        </section>
-      ) : null}
-
-      {recoveryHistory.length > 0 ? (
-        <section className="recovery-banner panel">
-          <div className="panel-block recovery-block">
-            <div className="block-header">
-              <h2>Recovery History</h2>
-              <span>{recoveryHistory.length}</span>
-            </div>
-            <div className="page-list server-list">
-              {recoveryHistory.map((entry, index) => (
-                <div key={`${entry.updatedAt}-${index}`} className="page-card">
-                  <div className="library-open">
-                    <strong>{entry.document?.title || 'Untitled draft'}</strong>
-                    <small>{new Date(entry.updatedAt).toLocaleString()}</small>
-                  </div>
-                  <div className="row-actions">
-                    <button className="mini-button" onClick={() => handleRecoverHistoryEntry(entry)}>Restore</button>
-                  </div>
-                </div>
-              ))}
-            </div>
+            <p className={`status-pill ${authStatus.type}`}>{authStatus.message || t('ui.enterCredentials')}</p>
           </div>
         </section>
       ) : null}
@@ -2305,6 +2376,77 @@ function App() {
               <h2>Tools</h2>
               <span>{activeTool}</span>
             </div>
+            <div className="block-header compact-header">
+              <h2>{t('ui.interface')}</h2>
+              <span>{Math.round(uiSettings.density * 100)}%</span>
+            </div>
+            <div className="inspector-grid">
+              <label>
+                <span>{t('ui.density')}</span>
+                <div className="slider-row">
+                  <input
+                    type="range"
+                    min="0.7"
+                    max="1.2"
+                    step="0.05"
+                    value={uiSettings.density}
+                    onChange={(event) => setUiSettings((prev) => ({ ...prev, density: Number(event.target.value) }))}
+                  />
+                  <strong className="range-value">{Math.round(uiSettings.density * 100)}%</strong>
+                </div>
+              </label>
+              <label>
+                <span>{t('ui.uiFontScale')}</span>
+                <div className="slider-row">
+                  <input
+                    type="range"
+                    min="0.85"
+                    max="1.3"
+                    step="0.05"
+                    value={uiSettings.fontScale}
+                    onChange={(event) => setUiSettings((prev) => ({ ...prev, fontScale: Number(event.target.value) }))}
+                  />
+                  <strong className="range-value">{Math.round(uiSettings.fontScale * 100)}%</strong>
+                </div>
+              </label>
+            </div>
+            <div className="row-actions">
+              <button className="mini-button" onClick={handleResetUiSettings}>{t('ui.resetUi')}</button>
+            </div>
+            <div className="block-header compact-header">
+              <h2>{t('ui.defaults')}</h2>
+              <span>{t('ui.newElements')}</span>
+            </div>
+            <div className="inspector-grid">
+              <label>
+                <span>Text W</span>
+                <input type="number" value={elementDefaults.textWidth} onChange={(event) => setElementDefaults((prev) => ({ ...prev, textWidth: Number(event.target.value) || prev.textWidth }))} />
+              </label>
+              <label>
+                <span>Text H</span>
+                <input type="number" value={elementDefaults.textHeight} onChange={(event) => setElementDefaults((prev) => ({ ...prev, textHeight: Number(event.target.value) || prev.textHeight }))} />
+              </label>
+              <label>
+                <span>Shape W</span>
+                <input type="number" value={elementDefaults.shapeWidth} onChange={(event) => setElementDefaults((prev) => ({ ...prev, shapeWidth: Number(event.target.value) || prev.shapeWidth }))} />
+              </label>
+              <label>
+                <span>Shape H</span>
+                <input type="number" value={elementDefaults.shapeHeight} onChange={(event) => setElementDefaults((prev) => ({ ...prev, shapeHeight: Number(event.target.value) || prev.shapeHeight }))} />
+              </label>
+              <label>
+                <span>Arrow W</span>
+                <input type="number" value={elementDefaults.arrowWidth} onChange={(event) => setElementDefaults((prev) => ({ ...prev, arrowWidth: Number(event.target.value) || prev.arrowWidth }))} />
+              </label>
+              <label>
+                <span>Table W</span>
+                <input type="number" value={elementDefaults.tableWidth} onChange={(event) => setElementDefaults((prev) => ({ ...prev, tableWidth: Number(event.target.value) || prev.tableWidth }))} />
+              </label>
+              <label>
+                <span>Table H</span>
+                <input type="number" value={elementDefaults.tableHeight} onChange={(event) => setElementDefaults((prev) => ({ ...prev, tableHeight: Number(event.target.value) || prev.tableHeight }))} />
+              </label>
+            </div>
             <div className="tool-grid">
               {TOOL_OPTIONS.map((tool) => (
                 <button key={tool.id} className={`tool-button ${activeTool === tool.id ? 'active' : ''}`} onClick={() => setActiveTool(tool.id)}>
@@ -2454,7 +2596,6 @@ function App() {
                     }
 
                     const sharedProps = {
-                      key: element.id,
                       selected,
                       draggable,
                       registerRef,
@@ -2520,7 +2661,7 @@ function App() {
 
                     if (element.type === 'rect') {
                       return (
-                        <Group {...sharedProps} {...groupProps}>
+                        <Group key={element.id} {...sharedProps} {...groupProps}>
                           {element.hidden ? null : (
                           <Rect width={element.width} height={element.height} fill={element.fill} stroke={element.stroke} strokeWidth={element.strokeWidth} opacity={element.opacity} cornerRadius={22} shadowColor={selected ? '#da7c46' : '#10232c'} shadowBlur={selected ? 18 : 8} shadowOpacity={0.15} />
                           )}
@@ -2530,7 +2671,7 @@ function App() {
 
                     if (element.type === 'ellipse') {
                       return (
-                        <Group {...sharedProps} {...groupProps}>
+                        <Group key={element.id} {...sharedProps} {...groupProps}>
                           {element.hidden ? null : (
                           <Ellipse x={element.width / 2} y={element.height / 2} radiusX={element.width / 2} radiusY={element.height / 2} fill={element.fill} stroke={element.stroke} strokeWidth={element.strokeWidth} opacity={element.opacity} shadowColor={selected ? '#da7c46' : '#10232c'} shadowBlur={selected ? 18 : 8} shadowOpacity={0.15} />
                           )}
@@ -2540,7 +2681,7 @@ function App() {
 
                     if (element.type === 'arrow') {
                       return (
-                        <Group {...sharedProps} {...groupProps}>
+                        <Group key={element.id} {...sharedProps} {...groupProps}>
                           {element.hidden ? null : (
                           <Arrow points={[0, 0, element.width, element.height]} stroke={element.stroke} fill={element.stroke} strokeWidth={element.strokeWidth} pointerLength={element.pointerLength} pointerWidth={element.pointerWidth} opacity={element.opacity} />
                           )}
@@ -2576,6 +2717,7 @@ function App() {
                     if (element.type === 'text') {
                       return element.hidden ? null : (
                         <Group
+                          key={element.id}
                           {...sharedProps}
                           {...groupProps}
                           onDblClick={() => openTextEditor(element)}
@@ -2586,11 +2728,11 @@ function App() {
                     }
 
                     if (element.type === 'image') {
-                      return element.hidden ? null : <CanvasImageNode {...sharedProps} element={element} />
+                      return element.hidden ? null : <CanvasImageNode key={element.id} {...sharedProps} element={element} />
                     }
 
                     if (element.type === 'table') {
-                      return element.hidden ? null : <TableNode {...sharedProps} element={element} />
+                      return element.hidden ? null : <TableNode key={element.id} {...sharedProps} element={element} />
                     }
 
                     return null
@@ -2642,6 +2784,40 @@ function App() {
         </main>
 
         <aside className="right-panel panel">
+          <div className="panel-block">
+            <div className="block-header">
+              <h2>{t('ui.recoveryHistory')}</h2>
+              <button className="mini-button" onClick={() => setRecoveryExpanded((prev) => !prev)}>
+                {recoveryExpanded ? '-' : '+'}
+              </button>
+            </div>
+            {recoveryDraft ? (
+              <div className="version-diff-card">
+                <strong>{t('ui.recoveryAvailable')}</strong>
+                <small>{formatDateTime(language, recoveryDraft.updatedAt)}</small>
+                <div className="row-actions">
+                  <button className="mini-button" onClick={handleRecoverDraft}>{t('ui.restoreDraft')}</button>
+                  <button className="mini-button danger" onClick={dismissRecoveryDraft}>{t('ui.dismiss')}</button>
+                </div>
+              </div>
+            ) : null}
+            {recoveryExpanded ? (
+              <div className="page-list server-list">
+                {recoveryHistory.map((entry, index) => (
+                  <div key={`${entry.updatedAt}-${index}`} className="page-card">
+                    <div className="library-open">
+                      <strong>{entry.document?.title || 'Untitled draft'}</strong>
+                      <small>{formatDateTime(language, entry.updatedAt)}</small>
+                    </div>
+                    <div className="row-actions">
+                      <button className="mini-button" onClick={() => handleRecoverHistoryEntry(entry)}>{t('ui.restore')}</button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            ) : null}
+          </div>
+
           <div className="panel-block">
             <div className="block-header">
               <h2>Selection</h2>
